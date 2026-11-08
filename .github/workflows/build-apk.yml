@@ -26,6 +26,11 @@ on:
         options:
           - release
           - debug
+      publish_release:
+        description: 'Also attach the APK to a GitHub release (tag builds always do)'
+        required: false
+        type: boolean
+        default: false
       abi:
         description: 'Target ABI'
         required: true
@@ -47,7 +52,7 @@ on:
       - 'android/**'
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -367,11 +372,21 @@ jobs:
 
       - name: Analyze (non-blocking)
         continue-on-error: true
-        run: flutter analyze --no-pub 2>&1 | tee "$LOG_DIR/analyze.log"
+        run: |
+          set +e
+          flutter analyze --no-pub 2>&1 | tee "$LOG_DIR/analyze.log"
+          status=${PIPESTATUS[0]}
+          echo "ANALYZE_STATUS=$status" >> "$GITHUB_ENV"
+          [ "$status" -eq 0 ] || echo "::warning::flutter analyze exited with $status (non-blocking)"
 
       - name: Unit tests (non-blocking)
         continue-on-error: true
-        run: flutter test --no-pub --reporter expanded 2>&1 | tee "$LOG_DIR/test.log"
+        run: |
+          set +e
+          flutter test --no-pub --reporter expanded 2>&1 | tee "$LOG_DIR/test.log"
+          status=${PIPESTATUS[0]}
+          echo "TEST_STATUS=$status" >> "$GITHUB_ENV"
+          [ "$status" -eq 0 ] || echo "::warning::flutter test exited with $status (non-blocking)"
 
       - name: Build APK
         run: |
@@ -469,6 +484,54 @@ jobs:
           else
             echo "No pull request context; diagnostics only in this log."
             cat "$OUT" | tail -80
+          fi
+
+      - name: Publish build summary
+        # Same reason as the failure diagnostics: the job log is not always reachable through the
+        # API, so the facts reviewers need are posted on the pull request.
+        if: success() && github.event_name == 'pull_request' && env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### APK build succeeded"
+            echo ""
+            echo "- Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null || echo n/a)"
+            echo "- Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            echo "- \`flutter analyze\` exit code: ${ANALYZE_STATUS:-not run}"
+            echo "- \`flutter test\` exit code: ${TEST_STATUS:-not run}"
+            echo ""
+            echo '```'
+            cat out/SHA256SUMS.txt 2>/dev/null || echo 'no checksums'
+            echo '```'
+          } > /tmp/build-summary.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/build-summary.md \
+            || echo "Could not post the build summary."
+
+      - name: Publish GitHub release
+        # Tag builds always publish; manual runs only when requested. Pull-request runs never do.
+        if: >-
+          success() &&
+          (startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            v*) : ;;
+            *) TAG="apk-$(date -u +%Y%m%d-%H%M%S)" ;;
+          esac
+          NOTES="arm64-v8a ${BUILD_MODE} APK built from ${GITHUB_SHA} by workflow run ${GITHUB_RUN_ID}.
+          Install with: adb install ${ABI}_${BUILD_MODE}.apk (verify SHA256SUMS.txt first)."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt --clobber
+            echo "Uploaded to existing release $TAG"
+          else
+            gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
+              --title "ReFreezer $TAG (arm64-v8a)" --notes "$NOTES"
+            echo "Created release $TAG"
           fi
 
       - name: Job summary
