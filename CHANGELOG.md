@@ -7,6 +7,69 @@ The project previously tracked changes through GitHub releases only; this file s
 
 ---
 
+## [Download upgrade + Downloads redesign] — 2026-11-08
+
+Native downloader reliability, queue management, database migration and a redesigned Downloads
+experience. **Static-only verification** (see `DEVELOPMENT_STATUS.md` §3): no build, analyse or
+device run was possible in this environment.
+
+### Added
+
+- **Download queue controls**: pause/resume per job, pause/resume the whole queue, cancel (kept in
+  history), retry one, retry all failed, priority (High/Normal/Low), move-to-front.
+- **Retry policy**: classified failures (`network`, `timeout`, `server`, `auth`, `storage`,
+  `permission`, `unavailable`, `processing`), bounded exponential backoff with jitter, `Retry-After`
+  support, per-job retry budget (0–10, configurable in Settings), no retries for permanent failures.
+- **Recovery**: running state persisted across process death, interrupted jobs recovered on start,
+  validated `Range` resume (206 only), orphaned temporary files purged at service start.
+- **Safe finalisation**: staging file in the destination folder + atomic rename; a job is only
+  `DONE` when a complete file exists; metadata (cover/lyrics/tags) failures keep the audio and are
+  reported as `metadataWarning` instead of failing the download.
+- **Aggregate notifications** (progress + "Downloads finished"), per-track notifications opt-in
+  (`Summary` / `Every track` / `None`), plus a `Download results` channel.
+- **Database v2** (`DownloadsDatabase`): additive columns for priority, retries, retry time, error
+  kind/message, expected size, creation order, group and metadata warning; idempotent self-healing
+  migration; downgrade preserves data.
+- **Dart layer**: `lib/api/download_models.dart` (pure, testable model), `DownloadController`
+  (single source of truth), new download API surface, `DownloadEnqueueResult`, `DownloadSummary`,
+  storage estimation.
+- **Design system**: `lib/ui/design/tokens.dart` and `components.dart` (obsidian/editorial tokens,
+  type scale, progress rule, status, buttons, sheets, filter bar, empty/error/skeleton states,
+  reduced-motion support).
+- **Redesigned Downloads screen**: overview header, filters with counts, search, grouped sections,
+  per-row speed/ETA/progress, swipe actions, batch selection, confirmations, undo for cancel,
+  separate "remove entry" vs "delete file", empty/loading/error states.
+- **Tests** (written, not executed here): `test/download_models_test.dart`,
+  `test/download_queue_test.dart`.
+
+### Changed
+
+- `DownloadService`: main-thread queue ownership replaces the cross-thread re-entrancy hack; the
+  service only stops when the queue is idle; worker reads are disconnected immediately on
+  pause/cancel; concurrency is clamped to 1–8; downloads do not start without credentials.
+- `MainActivity`: `addDownloads` returns `{added, existing, requeued}` and deduplicates on
+  track + destination + quality; new channel methods for the queue controls; state-change events
+  carry queue counters and `blockReason`; progress events carry `speed`.
+- `Download`: named-column SQL parsing (robust to older rows), new scheduling/diagnostic fields.
+- Settings: `downloadMaxRetries` and `downloadNotifications` (generated JSON updated by hand).
+
+### Fixed (by construction, needs device confirmation)
+
+- No false `DONE` for pre-existing zero-byte or partial files; no `DONE` after a failed decrypt.
+- No silent corruption from a server that ignores `Range`; no `Content-Length` double count.
+- No infinite retry loops; auth expiry is distinguishable from network failure.
+- No lost audio when tagging fails; no deletion of an existing file before its replacement exists.
+- No duplicate queue rows for the same track/destination/quality.
+- "Clear finished/queue" never deletes music files.
+
+### Known gaps
+
+- Wi-Fi-only / charging-only / low-battery-pause rules, and automation for new likes/playlists/
+  releases: not implemented.
+- Home, Player, Search, Library redesigns: not in this change.
+
+---
+
 ## [Unreleased]
 
 ### Added

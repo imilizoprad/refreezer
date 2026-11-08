@@ -1,116 +1,108 @@
 # ReFreezer — Development Status
 
-**Branch:** `arena/f4b6f150-refreezer` (from `master` @ `2bb8009`)
+**Branch:** `arena/f4b6f150-refreezer` (from `master` @ `2bb8009`, audit commit `fc21d87`)
 **Last updated:** 2026-11-08
-**Current phase:** Phase One — Complete repository audit (**DONE**) · Phase Two — UI/UX evaluation (**documented as analysis in `PROJECT_AUDIT.md` §5; `UI_UX_AUDIT.md` not yet produced — awaiting go-ahead**)
+**Current phase:** Downloader upgrade + Premium UI/UX execution — **engine (Parts 3–6) and Downloads UI (Part 5) implemented; runtime verification BLOCKED** (see §4)
 
 Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs input/environment) · **UNVERIFIED** (implemented, not adequately tested).
 
 ---
 
-## 1. Phase status
+## 1. Phase status (from the master execution prompt, Part 7)
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 — Repository audit | Read all sources, map architecture/features, identify defects, write the five audit documents | **DONE** (static audit; runtime verification BLOCKED — see §4) |
-| 2 — Product & UX evaluation | Screen-by-screen UX assessment; design system proposal | **IN PROGRESS** — findings captured in `PROJECT_AUDIT.md` §5 and `FEATURES_INVENTORY.md` §2-3. Dedicated `UI_UX_AUDIT.md` deliberately not created yet (first task was Phase One only) |
-| 3 — Architectural improvement | Proposal + decisions | **DONE (proposal)** — `ARCHITECTURE.md` §8, `UPGRADE_ROADMAP.md` M6 |
-| 4 — Implementation | Milestones M0–M8 | **NOT STARTED** — awaiting approval of D1–D8 (`UPGRADE_ROADMAP.md` §4) |
-| 5 — QA | Tests, device matrix | **BLOCKED** — no toolchain/emulator (§4) |
-| 6 — Release readiness | Build config, docs, signing | **NOT STARTED** (assessed in `UPGRADE_ROADMAP.md` M8) |
+| 0 — Inspect & baseline | Re-read the native downloader, Dart layer, DB schema, channel protocol; baseline the syntax harness | **DONE** |
+| 1 — Foundation | State model (append-only), DB v2 migration, `Download` model, `DownloadController`, design tokens | **DONE (static) / UNVERIFIED (runtime)** |
+| 2 — Downloader reliability & speed | Safe finalisation, validated resume, retry classification + backoff, auth/storage/unavailable separation, temp-file lifecycle, orphan cleanup, idle-only service shutdown | **DONE (static) / UNVERIFIED (runtime)** |
+| 3 — Queue & management | Priority, ordering/move-to-front, pause/resume per job and queue-wide, cancel, retry one/all, history cleanup without file deletion, duplicate prevention | **DONE (static) / UNVERIFIED (runtime)** |
+| 4 — Design system | Tokens (obsidian/editorial), typography scale, progress rule, status, buttons, empty/error/loading states, sheets, filter bar, search field; reduced-motion support | **DONE** |
+| 5 — Full UI/UX | Downloads screen rebuilt; Settings: retry + notification controls | **IN PROGRESS** — Downloads is the redesigned screen; Home/Player/Search/Library redesigns are **not** part of this pass |
+| 6 — Intelligent downloads | Notification policy (all/summary/none), priority/queue automation | **PARTIAL / UNVERIFIED** — Wi-Fi-only, charging-only, low-battery pause and "new likes / new releases" automation are **not implemented** (see §5) |
+| 7 — Polish & regression | Syntax verification, unit tests written, documentation | **IN PROGRESS** — tests written but **not executed** (no Dart/Flutter here) |
 
 ---
 
-## 2. Completed work
+## 2. What changed
 
-**Documents created (this turn)**
+### Native engine (`android/app/src/main/java/r/r/refreezer/`)
 
-| File | Purpose |
-|---|---|
-| `PROJECT_AUDIT.md` | Full audit report: purpose, architecture summary, journeys, problems (19 ranked defects), UX, performance, security, recommendations, roadmap summary, complexity/risk, method |
-| `ARCHITECTURE.md` | Runtime topology, module map with LOC, navigation, state, error handling, persistence, coupling hot-spots, target architecture + ADR-lite decisions (A1–A10), guardrails |
-| `FEATURES_INVENTORY.md` | Feature matrix by area with verification status, screen inventory, settings inventory, journeys with friction, feature gaps |
-| `BUGS_AND_TECHNICAL_DEBT.md` | 21 defects (BUG-01…BUG-21) with evidence/impact/fix/verification + 18 debt items (TD-01…TD-18) + prioritised fix order |
-| `UPGRADE_ROADMAP.md` | M0–M8 with objectives, affected files, work items, acceptance criteria, risks, estimates, approval gates (D1–D8), verification artefacts, non-goals |
-| `DEVELOPMENT_STATUS.md` | This file |
-| `CHANGELOG.md` | Documentation-only baseline entry |
-
-**Application code changed:** none. No files under `lib/`, `android/`, `assets/` or `translations/` were modified. No features added or removed. No backend contract touched.
-
----
-
-## 3. Key findings (one-screen summary)
-
-1. **The product is feature-rich and the feature work is largely real** — streaming, downloads, tagging, offline, lyrics, Android Auto/TV, 31 locales.
-2. **The failure mode is "silent or fatal":** unreachable error branches, uncaught async crashes from `late` locals, unguarded JSON loads that brick startup, no HTTP timeouts, no crash reporting.
-3. **Security:** unauthenticated loopback audio server (P0), plaintext ARL/Spotify secrets (P0/P1), global cleartext traffic, unverified self-update.
-4. **Verifiability:** zero tests, no CI, no lockfile, empty submodules, missing `.env`/`env.g.dart` → cannot build a fresh clone; nothing can be trusted until M0.
-5. **UX:** no design system (four duplicated `ThemeData`s, ~90 literal font sizes), three loading idioms, one empty state in the whole app, `fluttertoast` as the feedback mechanism, destructive actions without confirmations, dead "Visualizer" toggle.
-6. **Performance:** eager queue resolution, 250 ms player-bar rebuilds, non-virtualised lists with per-tile subscriptions, full-size palette extraction.
-
----
-
-## 4. Blockers
-
-| ID | Blocker | Impact | What is needed |
-|---|---|---|---|
-| BLK-01 | **No Flutter/Dart/Java/Android SDK in the environment**; `storage.googleapis.com`, `pub.dev`, `services.gradle.org` unreachable (only GitHub/npm/PyPI allowed) | `flutter pub get`, `dart format`, `flutter analyze`, `flutter test`, `flutter build`, emulator runs — all impossible | Provision a toolchain image (Flutter 3.32.x, JDK 17, Android SDK 35, NDK 27.0.12077973) with package-host access, or run the documented commands on a workstation/CI |
-| BLK-02 | **5 git submodules are empty** (`custom_navigator`, `equalizer_flutter`, `external_path`, `move_to_background`, `scrobblenaut`) | Cannot resolve path dependencies; build/tests cannot start even with a toolchain | Network access to `github.com` for `git submodule update --init` (GitHub *is* reachable here, so this can be attempted during M0) |
-| BLK-03 | **`lib/.env` and `lib/utils/env.g.dart` absent (git-ignored)** | `envied` class does not exist → compile error; requires Deezer + Last.fm API keys | Owner-supplied credentials in `lib/.env` (never commit) + `dart run build_runner build`; plus an `.env.example` for contributors |
-| BLK-04 | **No runtime device/API access** | Playback, downloads, permissions, Android Auto/TV, offline behaviour, real Deezer responses — all UNVERIFIED | Emulator/device with a test Deezer account |
-| BLK-05 | **Approval needed** for decisions D1–D8 (submodule strategy, one secure-storage dependency, removal of dead features/settings, storage strategy, distribution target, design direction) | Determines M2/M3/M4/M8 scope | Owner sign-off |
-
----
-
-## 5. Tests executed
-
-**Automated Dart/Flutter tests:** none exist in the repository (`test/` directory absent). None could be run (BLK-01).
-
-**Verification actually performed** (static; reproducible with the scripts described):
-
-| Check | Method | Result |
+| Area | Change | Status |
 |---|---|---|
-| Source inventory | `find`/`wc -l` | 227 tracked files; 31,667 Dart LOC (11,176 translations → ~20.5k real), 3,139 Java LOC |
-| Dependency usage | cross-reference `pubspec.yaml` deps vs `package:` imports | 3 unused deps (`animations`, `encrypt`, `pointycastle`); 2 commented-out imports (`flutter_file_dialog`, `restart_app`) |
-| Declared assets vs disk | path check | 0 missing declared assets; 6 code-referenced assets also declared (no gaps) |
-| i18n key coverage | parse `.i18n` literals vs `en_us.dart` | **11 missing** English keys; 16 stale/unmatched keys |
-| Locale coverage | per-locale key intersection with `en-US` (357 keys) | 31 locales, median 99.4 %; **`ur-PK` 3.9 %**, **`te-IN` 7.8 %** |
-| Generated code vs models | compare `*.g.dart` to annotated fields | No drift detected in `cache.g.dart`, `settings.g.dart`, `definitions.g.dart` |
-| Dead code | import/usage search | `utils/blowfish.dart` (1,170 LOC) unused; `utils/math_utils.dart` unused; 5 of 7 routes unused; `Settings.proxyAddress` unused; `QueueState.empty` unused |
-| Manifest/permission review | read `AndroidManifest.xml` + permission calls | `POST_NOTIFICATIONS` commented out while requested at startup; `MANAGE_EXTERNAL_STORAGE` + `requestLegacyExternalStorage` + `usesCleartextTraffic=true` |
-| CI/test presence | directory inspection | No workflows; no tests |
-| Defect confirmation | targeted source reading with line references | 21 defects documented, each with file:line evidence |
+| DB schema | `DownloadsDatabase` v2: additive columns (`priority`, `attempts`, `nextRetryAt`, `errorKind`, `errorMessage`, `bytesTotal`, `createdAt`, `groupId`, `metadataWarning`); real `onUpgrade` + idempotent `ensureColumns()` self-heal on open; **no table is dropped and no user data is discarded**; downgrade is a no-op that preserves rows | DONE / UNVERIFIED |
+| State model | `DownloadState` extended with `PAUSED(6)` / `CANCELLED(7)` **appended after `ERROR(5)`** so persisted ordinals and the `>= 3` "finished" test used by `MainActivity` keep their meaning | DONE |
+| Concurrency | Queue, DB and all transitions now run on the main thread; worker threads report through `postState`/`postFailure`; the `updateRequests`/`updating` re-entrancy hack is gone; every DB write is wrapped (no dangling transactions) | DONE / UNVERIFIED |
+| Scheduling | Ordered by `priority ASC, createdAt ASC, id ASC`; concurrency clamped to 1–8; start is refused while no ARL is configured (`blockReason=auth`) instead of failing every entry | DONE / UNVERIFIED |
+| Resume correctness | `Range` resume only accepted on HTTP 206; a 200 response truncates and restarts instead of appending at the wrong offset; `416` restarts from zero; `Content-Length` no longer double-counts on 206; short/incomplete transfers are rejected and kept for the next attempt | DONE / UNVERIFIED |
+| Retries | Failure classification (`network`, `timeout`, `server`, `auth`, `storage`, `permission`, `unavailable`, `processing`, `unknown`), bounded exponential backoff with ±20 % jitter (3 s → 5 min cap), `Retry-After` honoured, per-job retry budget from settings (`maxRetries`, 0 = off), permanent failures never retried | DONE / UNVERIFIED |
+| Finalisation | Download → decrypt → validate size → staging file **in the destination folder** → atomic rename → tags. A job is `DONE` only when a non-empty, expected-size file exists at the destination. A pre-existing good file is never overwritten unless the user enabled overwriting, and never deleted before the replacement is validated | DONE / UNVERIFIED |
+| Decryption | Failure is a first-class `processing` error (retryable), the encrypted temp file is kept, and the decrypt key now follows the stream that was actually downloaded (Deezer fallback-safe) | DONE / UNVERIFIED |
+| Metadata isolation | Cover/lyrics/tag failures no longer fail the download: the audio is kept and the job completes with `metadataWarning` (`cover`, `tags`, `albumArt`) | DONE / UNVERIFIED |
+| Temp lifecycle | `<id>.part`(+`.DEC`) replaces `<id>.ENC`, legacy files are migrated; temps deleted on cancel/remove; orphan temps purged at service start; `stopSelf()` no longer fires on every finished track (only an idle queue stops the service) | DONE / UNVERIFIED |
+| Pause/cancel | `SERVICE_PAUSE_DOWNLOAD`, `RESUME_DOWNLOAD`, `CANCEL_DOWNLOAD`, `RETRY_DOWNLOAD`, `SET_PRIORITY`, `MOVE_DOWNLOAD` added; blocking reads are disconnected on pause/cancel so the action is immediate; queue-wide pause keeps the queue and partial files | DONE / UNVERIFIED |
+| Duplicates | Identity is track + destination + quality + privacy; enqueue returns `{added, existing, requeued}`; load-time duplicates are cancelled instead of downloading twice; failed/cancelled requests re-queue instead of inserting a second row | DONE / UNVERIFIED |
+| Notifications | Two channels (progress `IMPORTANCE_MIN`, results `IMPORTANCE_LOW`); one aggregate queue notification instead of one per track; per-track results opt-in (`all`), queue summary always, final "Downloads finished" summary; permission-checked, never throws | DONE / UNVERIFIED |
+| Restart recovery | `running` persisted in `SharedPreferences`; on sticky restart the queue resumes once settings arrive; rows left in `DOWNLOADING`/`POST` are recovered to `NONE` with `errorKind=interrupted` | DONE / UNVERIFIED |
+| Media scanner | Broadcast still sent for public downloads, using the final destination path | DONE |
 
-**Not executed (BLOCKED):** `dart format`, `flutter analyze`, `dart run build_runner build`, `flutter test`, `flutter build apk`/`aab`, `adb`/emulator runs, any real API call.
+### Dart
 
----
+| Area | Change | Status |
+|---|---|---|
+| Model | New `lib/api/download_models.dart` (Flutter-free): state mirror with append-only ordinals, priority, retry/ETA/speed, dedupe key, human failure copy, filters, ordering, summary, storage estimate, formatters | DONE / UNVERIFIED |
+| API | `lib/api/download.dart` re-exports the model, adds pause/resume/cancel/retry/priority/move/enqueue/summary/free-space; `removeDownload(deleteFile:)`; state-change mirror fields; `downloadJsonFromTrack` (was `Download.jsonFromTrack`) | DONE / UNVERIFIED |
+| Controller | `lib/service/download_controller.dart`: single source of truth, throttled progress merge, coalesced refresh, optimistic state changes with reload, storage estimate | DONE / UNVERIFIED |
+| Design system | `lib/ui/design/tokens.dart` + `components.dart`: obsidian/editorial palette derived from the existing theme, type scale, 4-pt spacing, hairline rules, thin progress rule, status dots, buttons without gradients, empty/error/skeleton states, bottom sheets, filter bar, underline search, confirm dialog, reduced-motion aware | DONE |
+| Downloads screen | Rebuilt: overview header (state headline, aggregate progress, free space vs. estimate, auth/low-storage notices), filters with counts, search, grouped sections (Downloading / Queue / Needs attention / Finished), per-row status/progress/ETA/speed, pause/resume/cancel/retry/move-to-front, priority sheet, swipe pause/cancel, batch selection bar, confirmations, undo for cancel, "remove entry vs. delete file" split, empty/loading/error states | DONE / UNVERIFIED |
+| Settings | "Automatic retries" and "Download notifications" controls; settings model + generated JSON updated by hand (no `build_runner` available) and mapped to the native contract in `getServiceSettings()` | DONE / UNVERIFIED |
 
-## 6. Files modified
+### Tests (written, **not executed**)
 
-**Added:** `PROJECT_AUDIT.md`, `ARCHITECTURE.md`, `FEATURES_INVENTORY.md`, `BUGS_AND_TECHNICAL_DEBT.md`, `UPGRADE_ROADMAP.md`, `DEVELOPMENT_STATUS.md`, `CHANGELOG.md`.
-**Modified:** none. **Deleted:** none.
-**Git:** documentation committed on `arena/f4b6f150-refreezer` only.
-
----
-
-## 7. Important decisions
-
-| Decision | Reason |
-|---|---|
-| Audit statically instead of claiming tool results | No SDK/package-host access; fabricating `flutter analyze` output would violate the "never claim something works without testing it" rule |
-| No code changes in Phase One | Explicit instruction; also prevents unverifiable churn prior to M0 |
-| Defer `UI_UX_AUDIT.md` | Phase One was scoped first; UX findings are captured in `PROJECT_AUDIT.md` §5 so nothing is lost, and the dedicated document will be produced when Phase Two is approved |
-| Recommend no framework adoption (Riverpod/Bloc) | 59 dependencies already; `ChangeNotifier`/`ValueNotifier` covers the five shared-state needs with zero new deps |
-| Keep `custom_navigator`, `audio_service`, Java download service | Load-bearing for TV focus, media session and file integrity; replacements are high-risk with no user benefit |
-| Sequence security (M2) after crash containment (M1) | M1 is cheaper and reduces the chance that M2's process-boundary changes are conflated with unrelated crashes; both are patch-release sized |
+`test/download_models_test.dart`, `test/download_queue_test.dart` — ordinals/wire format, parsing tolerance, progress bounds, failure copy, retry timing, dedupe identity, ETA, ordering, filters, search, summary, storage estimation, formatting.
 
 ---
 
-## 8. Next steps (recommended order)
+## 3. Verification actually performed
 
-1. **Clear BLK-01/02/03** (toolchain + submodules + `.env`) so M0 can actually be executed and verified.
-2. **Approve D1–D8** (or confirm defaults) — especially D2 (secure-storage dependency) and D3 (remove dead Visualizer toggle).
-3. **Execute M0** (lockfile, bootstrap script, CI, i18n checker, toolchain docs) — first milestone that converts this audit into a verified baseline.
-4. Then M1 (crash containment) as the first user-visible patch release.
+| Check | Tool | Result |
+|---|---|---|
+| Dart syntax, all `lib/**` + `test/**` | `tree_sitter` + locally compiled `tree-sitter-dart` grammar | 55 files parsed; **3 errors, all pre-existing** (`lib/fonts/refreezer_icons.dart:16`, `lib/utils/app_icon_changer.dart:19`, `lib/utils/version.dart:28`). No new syntax errors. |
+| Java syntax, all `android/**/*.java` | `javalang` | 13 files, 0 parse errors |
+| Semantic compile (`javac`/`dart analyze`) | — | **BLOCKED** — no JDK/Dart/Flutter |
+| Unit tests | — | **BLOCKED** — no Dart/Flutter; tests are unrun |
+| Runtime/device behaviour | — | **BLOCKED** — no emulator, no Deezer account |
 
-Until a build and a device run are available, every behavioural statement in these documents stays labelled **VERIFIED (static)** or **UNVERIFIED (runtime)**.
+What the syntax checks do **not** prove: type correctness, API availability against the pinned Flutter/AGP versions, Gradle/manifest validity, and any runtime behaviour (downloads, decryption, resume, notifications).
+
+---
+
+## 4. Blockers (unchanged)
+
+| ID | Blocker | Impact |
+|---|---|---|
+| BLK-01 | No Flutter/Dart/Java/Android SDK; `pub.dev`, `storage.googleapis.com`, `services.gradle.org` unreachable | No analyse/test/build/emulator; API-level mistakes cannot be caught here |
+| BLK-02 | 5 git submodules empty | Fresh clone cannot resolve path dependencies |
+| BLK-03 | `lib/.env` / `lib/utils/env.g.dart` absent (git-ignored, owner credentials) | Compile error without owner-supplied keys |
+| BLK-04 | No device / Deezer account | Download, decryption, tagging, permission, Android Auto/TV paths remain unverified |
+
+---
+
+## 5. Known limitations of this pass (explicitly not done)
+
+1. **Wi-Fi-only / charging-only / low-battery-pause** download rules: not implemented (would need a `BroadcastReceiver`/`ConnectivityManager` gate; cannot be device-verified here).
+2. **Automation for new likes / new playlist tracks / new artist releases**: not implemented.
+3. **Collection-aware download rules** (skip already-offline inside an album/playlist batch): duplicate identity is enforced per track, but the UI does not yet pre-filter a whole collection before enqueueing.
+4. **Redesign scope**: only the Downloads screen plus new design primitives. Home, Player, Search and Library are unchanged; they still use the legacy theme and widgets.
+5. **Undo** exists for cancelling a download (resume). Removing an entry or clearing history is confirmation-only, because the row is deleted from the native DB.
+6. **Tagging happens after final rename**: a crash during tagging could leave a partially tagged file (audio bytes intact). Tagging a staging file before rename was rejected because the tag writer may depend on the file extension; recorded as a residual risk.
+7. **TV/DPAD focus order** on the new screen is untested; rows are plain `InkWell`s so focus traversal works, but it is unverified.
+8. **RTL/long-text**: layouts use `Flexible`/`ellipsis` and no fixed-width text, but RTL was not visually verified.
+9. **User-uploaded (negative id) tracks** still cannot be downloaded; they now fail with `unavailable` and a clear message instead of a generic error.
+
+---
+
+## 6. Next steps
+
+1. Provide the toolchain (or run on a workstation): `flutter pub get`, `dart format`, `flutter analyze`, `flutter test` (the new tests), then `flutter build apk --debug`.
+2. Device pass: pause/resume/cancel, app kill during download (resume), expired ARL, full storage, airplane-mode retry/backoff, tag failure, duplicate enqueue, 200-vs-206 resume, notification policy.
+3. Then: collection pre-filter ("skip already offline"), Wi-Fi/charging rules, and the remaining screens' redesign on top of `RfTokens`.
