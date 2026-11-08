@@ -207,6 +207,28 @@ jobs:
           chmod +x android/gradlew 2>/dev/null || true
           ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null || true
 
+      - name: Pre-fetch the Gradle distribution
+        run: |
+          # The runner's link to services.gradle.org occasionally times out mid-download, which
+          # kills the wrapper before Gradle even starts. Fetch the archive ourselves with retries
+          # and point the wrapper at the local file (file: URLs are supported).
+          set -euo pipefail
+          ZIP="/tmp/gradle-${GRADLE_VERSION}-bin.zip"
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            --max-time 900 -o "$ZIP" \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          ls -lh "$ZIP"
+          ZIP="$ZIP" python3 - <<'EOF'
+          import os, re
+          path = 'android/gradle/wrapper/gradle-wrapper.properties'
+          text = open(path).read()
+          text = re.sub(r'^distributionUrl=.*$',
+                        'distributionUrl=file:' + os.environ['ZIP'],
+                        text, flags=re.M)
+          open(path, 'w').write(text)
+          EOF
+          grep -n 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties
+
       - name: Generate code (Envied + json_serializable)
         run: dart run build_runner build --delete-conflicting-outputs 2>&1 | tee "$LOG_DIR/build-runner.log"
 
