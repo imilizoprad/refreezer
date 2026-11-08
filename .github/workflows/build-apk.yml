@@ -102,45 +102,72 @@ jobs:
 
       - name: Patch pinned submodules for the current toolchain
         run: |
-          # Both submodules are pinned to third-party commits that predate the Flutter/Dart
-          # versions used here. The patches are minimal, idempotent and stay inside the runner's
-          # checkout (they are never committed).
+          # Both submodules are pinned to third-party commits that predate the toolchain used
+          # here. The patches are minimal, idempotent, verified, and never committed: they only
+          # touch the runner's checkout.
           set -euo pipefail
-
-          # 1. WidgetsBindingObserver gained handleStatusBarTap(); custom_navigator implements the
-          #    interface explicitly and therefore has to provide it too.
-          cnav=custom_navigator/lib/custom_navigator.dart
-          if [ -f "$cnav" ] && ! grep -q 'handleStatusBarTap' "$cnav"; then
-            python3 - "$cnav" <<'EOF'
+          python3 - <<'EOF'
+          import re
           import sys
-          path = sys.argv[1]
-          text = open(path).read().rstrip()
-          assert text.endswith('}')
-          stub = '''
-            // Added by the build workflow: WidgetsBindingObserver declares handleStatusBarTap() in
-            // current Flutter releases and this class implements the interface explicitly.
-            @override
-            void handleStatusBarTap() {}
-          '''
-          open(path, 'w').write(text[:-1].rstrip() + '\n' + stub + '}\n')
-          EOF
-            echo "custom_navigator: added handleStatusBarTap()"
-          fi
+
+          ok = True
+
+          # 1. WidgetsBindingObserver gained handleStatusBarTap(); _CustomNavigatorState
+          #    implements the interface explicitly, so it must provide the member too. Insert the
+          #    stub inside that class (the file has further top-level classes after it).
+          path = 'custom_navigator/lib/custom_navigator.dart'
+          try:
+              text = open(path).read()
+          except OSError as exc:
+              print('::warning::cannot read %s: %s' % (path, exc))
+              text = ''
+          if text:
+              if 'handleStatusBarTap' in text:
+                  print('custom_navigator: already provides handleStatusBarTap()')
+              else:
+                  lines = text.splitlines()
+                  try:
+                      start = next(i for i, l in enumerate(lines)
+                                   if l.startswith('class _CustomNavigatorState'))
+                      end = next(i for i in range(start, len(lines)) if lines[i] == '}')
+                  except StopIteration:
+                      print('::error::could not locate _CustomNavigatorState in %s' % path)
+                      ok = False
+                  else:
+                      stub = [
+                          '',
+                          '  // Added by the build workflow: WidgetsBindingObserver declares',
+                          '  // handleStatusBarTap() in current Flutter releases and this class',
+                          '  // implements the interface explicitly.',
+                          '  @override',
+                          '  void handleStatusBarTap() {}',
+                      ]
+                      lines[end:end] = stub
+                      open(path, 'w').write('\n'.join(lines) + '\n')
+                      patched = open(path).read()
+                      inside = 'handleStatusBarTap' in patched
+                      print('custom_navigator: handleStatusBarTap() inserted:', inside)
+                      ok = ok and inside
 
           # 2. scrobblenaut declares a 3.0 language version, but json_serializable >= 6.10 emits
           #    null-aware elements (Dart 3.9+) into its generated code, which the formatter then
-          #    rejects for a 3.0 package. Raising the floor is enough to unblock codegen.
-          sp=scrobblenaut/pubspec.yaml
-          if [ -f "$sp" ]; then
-            python3 - "$sp" <<'EOF'
-          import re, sys
-          path = sys.argv[1]
-          text = open(path).read()
-          text = re.sub(r'(?m)^(\s*sdk:\s*).*$', r'\1">=3.9.0 <4.0.0"', text, count=1)
-          open(path, 'w').write(text)
+          #    rejects for a 3.0 package. Raising the floor unblocks codegen.
+          sp = 'scrobblenaut/pubspec.yaml'
+          try:
+              pubspec = open(sp).read()
+          except OSError as exc:
+              print('::warning::cannot read %s: %s' % (sp, exc))
+          else:
+              new_pubspec = re.sub(r'(?m)^(\s*sdk:\s*).*$', r'\1">=3.9.0 <4.0.0"',
+                                  pubspec, count=1)
+              if new_pubspec == pubspec:
+                  print('scrobblenaut: sdk constraint unchanged (check pubspec format)')
+              else:
+                  open(sp, 'w').write(new_pubspec)
+                  print('scrobblenaut: sdk floor raised for null-aware elements')
+
+          sys.exit(0 if ok else 1)
           EOF
-            grep -n 'sdk:' scrobblenaut/pubspec.yaml | head -2
-          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
