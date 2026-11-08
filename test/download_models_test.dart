@@ -25,7 +25,13 @@ void main() {
       expect(downloadStateFromIndex(99), DownloadState.NONE);
       expect(downloadStateFromIndex(-1), DownloadState.NONE);
       expect(downloadStateFromIndex(null), DownloadState.NONE);
-      expect(downloadStateFromIndex('3'), DownloadState.NONE);
+      expect(downloadStateFromIndex('not-a-number'), DownloadState.NONE);
+      expect(downloadStateFromIndex(''), DownloadState.NONE);
+      expect(downloadStateFromIndex(3.7), DownloadState.DONE);
+      // A numeric string is still a valid ordinal: older platform-channel payloads encoded
+      // numbers as strings, so those must not collapse to NONE.
+      expect(downloadStateFromIndex('3'), DownloadState.DONE);
+      expect(downloadStateFromIndex('99'), DownloadState.NONE);
       expect(downloadStateFromIndex(6, fallback: DownloadState.ERROR),
           DownloadState.PAUSED);
     });
