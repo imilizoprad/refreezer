@@ -220,7 +220,12 @@ instrumentation tests for the queue state machine plus a fake HTTP server for re
 7. User-uploaded (negative id) tracks still cannot be downloaded; they now fail with a clear
    “not available” message.
 8. TV/DPAD focus order, RTL, large-font and screen-reader behaviour on the new screen are unverified.
-9. `DownloadService.java` remains a large class; extraction (queue/notifications/worker) is worth doing
+9. **No foreground service**: a queue running while the app is backgrounded can still be killed by
+   the OS (unchanged from baseline). The service now shuts down when idle and unbound, but a long
+   download in the background is not protected. Converting it to a `dataSync` foreground service
+   (which can reuse the summary notification) needs manifest/permission changes that cannot be
+   verified here — recommended as the next reliability step.
+10. `DownloadService.java` remains a large class; extraction (queue/notifications/worker) is worth doing
    once tests can run.
 
 ---

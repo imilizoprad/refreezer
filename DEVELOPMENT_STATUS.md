@@ -38,7 +38,7 @@ Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs inpu
 | Finalisation | Download → decrypt → validate size → staging file **in the destination folder** → atomic rename → tags. A job is `DONE` only when a non-empty, expected-size file exists at the destination. A pre-existing good file is never overwritten unless the user enabled overwriting, and never deleted before the replacement is validated | DONE / UNVERIFIED |
 | Decryption | Failure is a first-class `processing` error (retryable), the encrypted temp file is kept, and the decrypt key now follows the stream that was actually downloaded (Deezer fallback-safe) | DONE / UNVERIFIED |
 | Metadata isolation | Cover/lyrics/tag failures no longer fail the download: the audio is kept and the job completes with `metadataWarning` (`cover`, `tags`, `albumArt`) | DONE / UNVERIFIED |
-| Temp lifecycle | `<id>.part`(+`.DEC`) replaces `<id>.ENC`, legacy files are migrated; temps deleted on cancel/remove; orphan temps purged at service start; `stopSelf()` no longer fires on every finished track (only an idle queue stops the service) | DONE / UNVERIFIED |
+| Temp lifecycle | `<id>.part`(+`.DEC`) replaces `<id>.ENC`, legacy files are migrated; temps deleted on cancel/remove; orphan temps purged at service start; `stopSelf()` no longer fires on every finished track — the service stops only when the queue is idle **and** no UI is bound, so an idle app does not keep a 500 ms loop alive | DONE / UNVERIFIED |
 | Pause/cancel | `SERVICE_PAUSE_DOWNLOAD`, `RESUME_DOWNLOAD`, `CANCEL_DOWNLOAD`, `RETRY_DOWNLOAD`, `SET_PRIORITY`, `MOVE_DOWNLOAD` added; blocking reads are disconnected on pause/cancel so the action is immediate; queue-wide pause keeps the queue and partial files | DONE / UNVERIFIED |
 | Duplicates | Identity is track + destination + quality + privacy; enqueue returns `{added, existing, requeued}`; load-time duplicates are cancelled instead of downloading twice; failed/cancelled requests re-queue instead of inserting a second row | DONE / UNVERIFIED |
 | Notifications | Two channels (progress `IMPORTANCE_MIN`, results `IMPORTANCE_LOW`); one aggregate queue notification instead of one per track; per-track results opt-in (`all`), queue summary always, final "Downloads finished" summary; permission-checked, never throws | DONE / UNVERIFIED |
@@ -97,7 +97,10 @@ What the syntax checks do **not** prove: type correctness, API availability agai
 6. **Tagging happens after final rename**: a crash during tagging could leave a partially tagged file (audio bytes intact). Tagging a staging file before rename was rejected because the tag writer may depend on the file extension; recorded as a residual risk.
 7. **TV/DPAD focus order** on the new screen is untested; rows are plain `InkWell`s so focus traversal works, but it is unverified.
 8. **RTL/long-text**: layouts use `Flexible`/`ellipsis` and no fixed-width text, but RTL was not visually verified.
-9. **User-uploaded (negative id) tracks** still cannot be downloaded; they now fail with `unavailable` and a clear message instead of a generic error.
+9. **No foreground service**: a long queue running while the app is in the background can still be
+   killed by the OS (same as before). Moving the queue to a `dataSync` foreground service is the
+   recommended follow-up; it needs manifest changes that cannot be verified in this environment.
+10. **User-uploaded (negative id) tracks** still cannot be downloaded; they now fail with `unavailable` and a clear message instead of a generic error.
 
 ---
 

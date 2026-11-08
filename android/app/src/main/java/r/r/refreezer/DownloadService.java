@@ -118,6 +118,8 @@ public class DownloadService extends Service {
 
     Messenger serviceMessenger;
     Messenger activityMessenger;
+    /** True while an Activity is bound; an idle, unbound service shuts itself down. */
+    boolean bound = false;
     NotificationManagerCompat notificationManager;
     SharedPreferences prefs;
 
@@ -172,7 +174,19 @@ public class DownloadService extends Service {
     }
 
     @Override
+    public boolean onUnbind(Intent intent) {
+        bound = false;
+        // The activity is gone: if nothing is queued or running, free the process.
+        if (!running && threads.isEmpty() && !hasSchedulableWork()) {
+            if (progressUpdateHandler != null) progressUpdateHandler.removeCallbacksAndMessages(null);
+            stopSelf();
+        }
+        return super.onUnbind(intent);
+    }
+
+    @Override
     public IBinder onBind(Intent intent) {
+        bound = true;
         serviceMessenger = new Messenger(new IncomingHandler(this));
         if (intent != null) activityMessenger = intent.getParcelableExtra("activityMessenger");
         return serviceMessenger.getBinder();
@@ -762,6 +776,14 @@ public class DownloadService extends Service {
                 persistRunningFlag();
                 updateState();
                 notifyQueueFinished();
+            }
+
+            // Idle and nothing bound to us: do not keep a 500 ms loop alive in the background.
+            if (!running && !bound && threads.isEmpty() && !hasSchedulableWork()) {
+                if (progressUpdateHandler != null) {
+                    progressUpdateHandler.removeCallbacksAndMessages(null);
+                }
+                stopSelf();
             }
         } catch (Exception e) {
             Log.w("DOWN", "tick failed: " + e);
