@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       flutter_version:
-        description: 'Flutter version (leave empty for latest stable)'
+        description: 'Flutter version (leave empty for the newest stable release the project supports, currently 3.32.x)'
         required: false
         default: ''
       build_mode:
@@ -106,11 +106,50 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Resolve Flutter version
+        id: flutter-version
+        env:
+          REQUESTED: ${{ inputs.flutter_version }}
+          # Flutter 3.35 renamed the material theme classes (`BottomAppBarTheme` ->
+          # `BottomAppBarThemeData`), which lib/settings.dart still uses, and the pinned
+          # custom_navigator submodule no longer satisfies NavigatorState on newer releases.
+          # Resolve the newest stable release below 3.35.0 instead of hardcoding a patch version.
+          FLUTTER_CEILING: '3.35.0'
+        run: |
+          set -euo pipefail
+          if [ -n "${REQUESTED:-}" ]; then
+            echo "Using requested Flutter $REQUESTED"
+            echo "version=$REQUESTED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsSL --retry 4 --retry-all-errors -o /tmp/flutter-releases.json \
+            https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          python3 - <<'EOF'
+          import json, os, re
+          ceiling = os.environ.get('FLUTTER_CEILING', '3.36.0')
+          def key(v):
+              m = re.match(r'(\d+)\.(\d+)\.(\d+)', v)
+              return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+          data = json.load(open('/tmp/flutter-releases.json'))
+          stable = [r for r in data.get('releases', [])
+                    if r.get('channel') == 'stable' and r.get('version')
+                    and '-' not in r['version']]
+          stable.sort(key=lambda r: r.get('release_date', ''), reverse=True)
+          limit = key(ceiling)
+          candidates = [r['version'] for r in stable if key(r['version']) < limit]
+          if not candidates:
+              raise SystemExit('no stable Flutter release below %s found' % ceiling)
+          version = candidates[0]
+          print('Newest stable Flutter below', ceiling, 'is', version)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write('version=%s\n' % version)
+          EOF
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: ${{ inputs.flutter_version || '' }}
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
           cache: true
 
       - name: Flutter version
@@ -228,6 +267,23 @@ jobs:
           open(path, 'w').write(text)
           EOF
           grep -n 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Generate code in path dependencies
+        run: |
+          # scrobblenaut/json_serializable models ship without their *.g.dart files, so the app
+          # does not compile until each path dependency runs its own build_runner.
+          set -euo pipefail
+          for pkg in custom_navigator equalizer_flutter external_path move_to_background scrobblenaut; do
+            [ -f "$pkg/pubspec.yaml" ] || continue
+            if grep -qE 'build_runner|json_serializable' "$pkg/pubspec.yaml"; then
+              echo "--- codegen for $pkg"
+              ( cd "$pkg" && flutter pub get && dart run build_runner build --delete-conflicting-outputs ) \
+                2>&1 | tee -a "$LOG_DIR/codegen-$pkg.log"
+              generated=$(find "$pkg/lib" -name '*.g.dart' | wc -l)
+              echo "$pkg generated $generated .g.dart file(s)"
+              [ "$generated" -gt 0 ] || { echo "::error::no generated code in $pkg"; exit 1; }
+            fi
+          done
 
       - name: Generate code (Envied + json_serializable)
         run: dart run build_runner build --delete-conflicting-outputs 2>&1 | tee "$LOG_DIR/build-runner.log"

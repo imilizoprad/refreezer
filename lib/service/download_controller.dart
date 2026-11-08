@@ -30,7 +30,7 @@ class DownloadController extends ChangeNotifier {
   Timer? _notifyTimer;
   bool _refreshing = false;
   bool _refreshPending = false;
-  DateTime? _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool get isBusy => summary.active > 0;
 
