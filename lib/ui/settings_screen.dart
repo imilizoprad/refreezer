@@ -1051,7 +1051,11 @@ class _DownloadsSettingsState extends State<DownloadsSettings> {
             trailing: DropdownButton<int>(
               value: settings.downloadMaxRetries,
               underline: const SizedBox.shrink(),
-              items: const [0, 1, 2, 3, 4, 6, 8]
+              // The stored value is always part of the list, including values saved by
+              // an older build, so the dropdown can never assert at runtime.
+              items: (<int>{0, 1, 2, 3, 4, 6, 8, settings.downloadMaxRetries}
+                      .toList()
+                    ..sort())
                   .map((int value) => DropdownMenuItem<int>(
                         value: value,
                         child: Text(value == 0 ? 'Off'.i18n : '$value'),
@@ -1071,7 +1075,10 @@ class _DownloadsSettingsState extends State<DownloadsSettings> {
                     .i18n),
             leading: const Icon(Icons.notifications_none),
             trailing: DropdownButton<String>(
-              value: settings.downloadNotifications,
+              value: const ['summary', 'all', 'none']
+                      .contains(settings.downloadNotifications)
+                  ? settings.downloadNotifications
+                  : 'summary',
               underline: const SizedBox.shrink(),
               items: [
                 DropdownMenuItem<String>(
