@@ -71,7 +71,7 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      NDK_VERSION: '27.0.12077973'
+      NDK_VERSION: '28.2.13676358'
       # Keep the wrapper in sync with android/gradle/wrapper/gradle-wrapper.properties.
       GRADLE_VERSION: '8.14.3'
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
