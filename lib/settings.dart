@@ -65,6 +65,12 @@ class Settings {
   late bool overwriteDownload;
   @JsonKey(defaultValue: 2)
   late int downloadThreads;
+  /// Automatic retries per download before it is reported as failed (0 disables retries).
+  @JsonKey(defaultValue: 4)
+  late int downloadMaxRetries;
+  /// Download notifications: 'all' (one per track), 'summary' (queue only) or 'none'.
+  @JsonKey(defaultValue: 'summary')
+  late String downloadNotifications;
   @JsonKey(defaultValue: false)
   late bool playlistFolder;
   @JsonKey(defaultValue: true)
@@ -183,7 +189,11 @@ class Settings {
 
   //JSON to forward into download service
   Map getServiceSettings() {
-    return {'json': jsonEncode(toJson())};
+    // Keys consumed by DownloadService.DownloadSettings.fromBundle.
+    Map json = toJson();
+    json['maxRetries'] = downloadMaxRetries;
+    json['notifications'] = downloadNotifications;
+    return {'json': jsonEncode(json)};
   }
 
   Future<void> updateAppIcon(String iconKey) async {

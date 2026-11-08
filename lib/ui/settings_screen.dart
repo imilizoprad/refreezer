@@ -1043,6 +1043,53 @@ class _DownloadsSettingsState extends State<DownloadsSettings> {
               }),
           const FreezerDivider(),
           ListTile(
+            title: Text('Automatic retries'.i18n),
+            subtitle: Text(
+                'Retry failed downloads up to ${settings.downloadMaxRetries} times with increasing delays'
+                    .i18n),
+            leading: const Icon(Icons.replay),
+            trailing: DropdownButton<int>(
+              value: settings.downloadMaxRetries,
+              underline: const SizedBox.shrink(),
+              items: const [0, 1, 2, 3, 4, 6, 8]
+                  .map((int value) => DropdownMenuItem<int>(
+                        value: value,
+                        child: Text(value == 0 ? 'Off'.i18n : '$value'),
+                      ))
+                  .toList(),
+              onChanged: (int? value) async {
+                if (value == null) return;
+                setState(() => settings.downloadMaxRetries = value);
+                await settings.save();
+              },
+            ),
+          ),
+          ListTile(
+            title: Text('Download notifications'.i18n),
+            subtitle: Text(
+                'Choose how much the app is allowed to notify you about downloads'
+                    .i18n),
+            leading: const Icon(Icons.notifications_none),
+            trailing: DropdownButton<String>(
+              value: settings.downloadNotifications,
+              underline: const SizedBox.shrink(),
+              items: [
+                DropdownMenuItem<String>(
+                    value: 'summary', child: Text('Summary'.i18n)),
+                DropdownMenuItem<String>(
+                    value: 'all', child: Text('Every track'.i18n)),
+                DropdownMenuItem<String>(
+                    value: 'none', child: Text('None'.i18n)),
+              ],
+              onChanged: (String? value) async {
+                if (value == null) return;
+                setState(() => settings.downloadNotifications = value);
+                await settings.save();
+              },
+            ),
+          ),
+          const FreezerDivider(),
+          ListTile(
             title: Text('Tags'.i18n),
             leading: const Icon(Icons.label),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(
