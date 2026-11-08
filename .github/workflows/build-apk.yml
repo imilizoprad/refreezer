@@ -72,6 +72,8 @@ jobs:
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       NDK_VERSION: '27.0.12077973'
+      # Keep the wrapper in sync with android/gradle/wrapper/gradle-wrapper.properties.
+      GRADLE_VERSION: '8.14.3'
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
       ABI: ${{ inputs.abi || 'arm64-v8a' }}
       LOG_DIR: ${{ github.workspace }}/.ci-logs
@@ -195,12 +197,12 @@ jobs:
           } > android/local.properties
 
           if command -v gradle > /dev/null 2>&1; then
-            (cd android && gradle wrapper --gradle-version 8.12 --distribution-type bin) || true
+            (cd android && gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin) || true
           fi
           if [ ! -f android/gradle/wrapper/gradle-wrapper.jar ]; then
-            curl -fsSL -o android/gradlew https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradlew || true
+            curl -fsSL -o android/gradlew "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradlew" || true
             curl -fsSL -o android/gradle/wrapper/gradle-wrapper.jar \
-              https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradle/wrapper/gradle-wrapper.jar || true
+              "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" || true
           fi
           chmod +x android/gradlew 2>/dev/null || true
           ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null || true
@@ -219,6 +221,10 @@ jobs:
       - name: Build APK
         run: |
           set -euo pipefail
+          # Later duplicate keys win in a Java properties file.
+          printf '\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8\n' \
+            >> android/gradle.properties
+          grep -n "gradle-" android/gradle/wrapper/gradle-wrapper.properties || true
           case "$ABI" in
             arm64-v8a)   TARGET=android-arm64 ;;
             armeabi-v7a) TARGET=android-arm ;;
