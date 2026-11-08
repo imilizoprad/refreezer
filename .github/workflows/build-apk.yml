@@ -8,7 +8,8 @@ name: Build APK (arm64-v8a)
 #     automatically;
 #   - this workflow materialises everything the build needs on a clean GitHub runner.
 #
-# Trigger it manually (Actions -> Build APK -> Run workflow), or push a tag (v*).
+# It also publishes a diagnostic comment on pull requests when a build fails, so the failure is
+# readable from the API without downloading the (large) job log.
 
 on:
   workflow_dispatch:
@@ -47,6 +48,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: build-apk-${{ github.ref }}
@@ -72,6 +74,7 @@ jobs:
       NDK_VERSION: '27.0.12077973'
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
       ABI: ${{ inputs.abi || 'arm64-v8a' }}
+      LOG_DIR: ${{ github.workspace }}/.ci-logs
 
     steps:
       - name: Checkout (with submodules)
@@ -79,6 +82,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: Prepare log directory
+        run: mkdir -p "$LOG_DIR"
 
       - name: Verify path dependencies (submodules) are present
         run: |
@@ -106,13 +112,21 @@ jobs:
           cache: true
 
       - name: Flutter version
-        run: flutter --version
+        run: flutter --version 2>&1 | tee "$LOG_DIR/flutter-version.log"
 
-      - name: Set up Android SDK (platform 35 + NDK)
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Install Android NDK
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}" > /dev/null
+          # The NDK is large and only needed where a plugin compiles native code, so a failure here
+          # is a warning rather than a hard stop.
+          sdkmanager "ndk;${NDK_VERSION}" > /dev/null 2>&1 \
+            || echo "::warning::NDK ${NDK_VERSION} not installed by sdkmanager."
           echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Create lib/.env (Envied source)
@@ -130,34 +144,6 @@ jobs:
             echo "lastFmApiSecret=${LASTFM_API_SECRET:-placeholder_lastfm_secret}"
           } > lib/.env
           echo "wrote lib/.env with $(wc -l < lib/.env) lines"
-
-      - name: Ensure Gradle wrapper (git-ignored upstream)
-        run: |
-          # android/gradlew and the wrapper jar are excluded by android/.gitignore upstream, so a
-          # fresh clone has none. Flutter injects them during build; this step makes it explicit and
-          # never fails the job on its own.
-          if [ -x android/gradlew ]; then
-            echo "Wrapper already present."
-            exit 0
-          fi
-          {
-            echo "flutter.sdk=${FLUTTER_ROOT}"
-            echo "sdk.dir=${ANDROID_SDK_ROOT}"
-          } > android/local.properties
-
-          if command -v gradle > /dev/null 2>&1; then
-            (cd android && gradle wrapper --gradle-version 8.12 --distribution-type bin) || true
-          fi
-          if [ ! -x android/gradlew ]; then
-            echo "Gradle CLI unavailable - fetching the wrapper from the Gradle repository."
-            curl -fsSL -o android/gradlew https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradlew || true
-            mkdir -p android/gradle/wrapper
-            curl -fsSL -o android/gradle/wrapper/gradle-wrapper.jar \
-              https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradle/wrapper/gradle-wrapper.jar || true
-          fi
-          chmod +x android/gradlew 2>/dev/null || true
-          ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null \
-            || echo "Still missing - Flutter will inject the wrapper during build."
 
       - name: Configure release signing
         run: |
@@ -191,18 +177,44 @@ jobs:
           ls -la app | grep -Ei 'keystore|\.jks' || true
 
       - name: Resolve dependencies
-        run: flutter pub get
+        run: flutter pub get 2>&1 | tee "$LOG_DIR/pub-get.log"
+
+      - name: Ensure Gradle wrapper (git-ignored upstream)
+        continue-on-error: true
+        run: |
+          # android/gradlew and the wrapper jar are excluded by android/.gitignore upstream, so a
+          # fresh clone has none. Flutter injects them during build; this makes it explicit.
+          if [ -x android/gradlew ]; then
+            echo "Wrapper already present."
+            exit 0
+          fi
+          mkdir -p android/gradle/wrapper
+          {
+            echo "flutter.sdk=${FLUTTER_ROOT}"
+            echo "sdk.dir=${ANDROID_SDK_ROOT}"
+          } > android/local.properties
+
+          if command -v gradle > /dev/null 2>&1; then
+            (cd android && gradle wrapper --gradle-version 8.12 --distribution-type bin) || true
+          fi
+          if [ ! -f android/gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -fsSL -o android/gradlew https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradlew || true
+            curl -fsSL -o android/gradle/wrapper/gradle-wrapper.jar \
+              https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradle/wrapper/gradle-wrapper.jar || true
+          fi
+          chmod +x android/gradlew 2>/dev/null || true
+          ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null || true
 
       - name: Generate code (Envied + json_serializable)
-        run: dart run build_runner build --delete-conflicting-outputs
+        run: dart run build_runner build --delete-conflicting-outputs 2>&1 | tee "$LOG_DIR/build-runner.log"
 
       - name: Analyze (non-blocking)
         continue-on-error: true
-        run: flutter analyze --no-pub
+        run: flutter analyze --no-pub 2>&1 | tee "$LOG_DIR/analyze.log"
 
       - name: Unit tests (non-blocking)
         continue-on-error: true
-        run: flutter test --no-pub --reporter expanded
+        run: flutter test --no-pub --reporter expanded 2>&1 | tee "$LOG_DIR/test.log"
 
       - name: Build APK
         run: |
@@ -214,15 +226,14 @@ jobs:
             fat)         TARGET="android-arm,android-arm64,android-x64" ;;
             *)           echo "::error::unknown ABI $ABI"; exit 1 ;;
           esac
-
-          ARGS="--$BUILD_MODE --target-platform $TARGET"
-          if [ "$ABI" != "fat" ]; then
-            ARGS="$ARGS --split-per-abi"
-          fi
-          echo "flutter build apk $ARGS"
-          flutter build apk $ARGS
+          echo "flutter build apk --$BUILD_MODE --target-platform $TARGET"
+          set +e
+          flutter build apk "--$BUILD_MODE" --target-platform "$TARGET" 2>&1 | tee "$LOG_DIR/build-apk.log"
+          status=${PIPESTATUS[0]}
+          exit $status
 
       - name: Collect artifacts
+        if: success()
         run: |
           set -euo pipefail
           mkdir -p out
@@ -237,6 +248,7 @@ jobs:
             echo "produced: $f ($(du -h "$f" | cut -f1))"
             cp "$f" out/
           done
+          # Single, descriptive name for the arm64 build.
           if [ -f out/app-arm64-v8a-release.apk ]; then
             cp out/app-arm64-v8a-release.apk "out/ReFreezer-$ABI-$BUILD_MODE.apk"
           elif [ -f out/app-release.apk ]; then
@@ -245,6 +257,7 @@ jobs:
           (cd out && sha256sum *.apk | tee SHA256SUMS.txt)
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ReFreezer-${{ env.ABI }}-${{ env.BUILD_MODE }}
@@ -252,13 +265,57 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # --- Diagnostics: make failures readable without downloading the job log ----------------
+      - name: Publish failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          OUT=/tmp/diagnostics.md
+          {
+            echo "### APK build failed"
+            echo ""
+            echo "Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null)"
+            echo "Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            echo ""
+            for f in build-apk build-runner pub-get analyze test; do
+              log="$LOG_DIR/$f.log"
+              [ -f "$log" ] || continue
+              echo "<details><summary><code>$f.log</code> (last 120 lines)</summary>"
+              echo ""
+              echo '```'
+              grep -iE "error|FAILURE|Exception|failed|Cannot|not found|Unsupported|requires|warning: " "$log" | tail -60
+              echo '--- tail ---'
+              tail -60 "$log"
+              echo '```'
+              echo "</details>"
+              echo ""
+            done
+          } > "$OUT"
+          # Cap the payload so the API accepts it.
+          head -c 55000 "$OUT" > "${OUT}.trim"
+          mv "${OUT}.trim" "$OUT"
+
+          # Annotations for the UI (also visible through the check-run API).
+          first_error=$(grep -iE "^.*(error:|Error:|FAILURE:|Exception)" "$LOG_DIR/build-apk.log" 2>/dev/null | head -3 | tr '\n' ' ' | cut -c1-900)
+          [ -n "$first_error" ] && echo "::error::${first_error}"
+
+          if [ -n "${PR_NUMBER:-}" ]; then
+            gh pr comment "$PR_NUMBER" --body-file "$OUT" || echo "Could not post the diagnostic comment."
+          else
+            echo "No pull request context; diagnostics only in this log."
+            cat "$OUT" | tail -80
+          fi
+
       - name: Job summary
         if: always()
         run: |
           {
             echo "### APK build"
             echo ""
-            echo "- Flutter: $(flutter --version 2>/dev/null | head -1 || echo n/a)"
+            echo "- Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null || echo n/a)"
             echo "- Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
             if [ -f out/SHA256SUMS.txt ]; then
               echo ""
