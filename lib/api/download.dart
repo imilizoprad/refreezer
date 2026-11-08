@@ -13,11 +13,14 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../api/deezer.dart';
+import 'download_models.dart';
 import '../api/definitions.dart';
 import '../utils/navigator_keys.dart';
 import '../settings.dart';
 import '../translations.i18n.dart';
 import '../utils/file_utils.dart';
+
+export 'download_models.dart';
 
 DownloadManager downloadManager = DownloadManager();
 
@@ -29,6 +32,17 @@ class DownloadManager {
 
   bool running = false;
   int queueSize = 0;
+
+  // Mirrors of the last state-change event, so the UI has a cheap overview.
+  int activeDownloads = 0;
+  int pausedDownloads = 0;
+  int failedDownloads = 0;
+  int completedDownloads = 0;
+  int totalBytes = 0;
+  int doneBytes = 0;
+
+  /// Why the queue cannot start (currently only 'auth' when no ARL is stored).
+  String? blockReason;
 
   StreamController serviceEvents = StreamController.broadcast();
   String? offlinePath;
@@ -82,9 +96,16 @@ class DownloadManager {
 
     //Listen to state change event
     eventChannel.receiveBroadcastStream().listen((e) {
-      if (e['action'] == 'onStateChange') {
-        running = e['running'];
-        queueSize = e['queueSize'];
+      if (e != null && e['action'] == 'onStateChange') {
+        running = e['running'] ?? running;
+        queueSize = e['queueSize'] ?? queueSize;
+        activeDownloads = e['active'] ?? activeDownloads;
+        pausedDownloads = e['paused'] ?? pausedDownloads;
+        failedDownloads = e['failed'] ?? failedDownloads;
+        completedDownloads = e['completed'] ?? completedDownloads;
+        totalBytes = e['totalBytes'] ?? totalBytes;
+        doneBytes = e['doneBytes'] ?? doneBytes;
+        blockReason = e['blockReason'];
       }
 
       //Forward
@@ -262,7 +283,7 @@ class DownloadManager {
     //Get path
     String path = _generatePath(track, private, isSingleton: isSingleton);
     await platform.invokeMethod('addDownloads', [
-      await Download.jsonFromTrack(track, path,
+      await downloadJsonFromTrack(track, path,
           private: private, quality: quality)
     ]);
     await start();
@@ -303,7 +324,7 @@ class DownloadManager {
     //Create downloads
     List<Map> out = [];
     for (Track t in (album.tracks ?? [])) {
-      out.add(await Download.jsonFromTrack(t, _generatePath(t, private),
+      out.add(await downloadJsonFromTrack(t, _generatePath(t, private),
           private: private, quality: quality));
     }
     await platform.invokeMethod('addDownloads', out);
@@ -347,7 +368,7 @@ class DownloadManager {
     List<Map> out = [];
     for (int i = 0; i < (playlist.tracks?.length ?? 0); i++) {
       Track t = playlist.tracks![i];
-      out.add(await Download.jsonFromTrack(
+      out.add(await downloadJsonFromTrack(
           t,
           _generatePath(
             t,
@@ -702,9 +723,10 @@ class DownloadManager {
     }
   }
 
-  //Remove download from queue/finished
-  Future removeDownload(int id) async {
-    await platform.invokeMethod('removeDownload', {'id': id});
+  //Remove download from queue/finished. deleteFile is only honoured when the user asks for it.
+  Future removeDownload(int id, {bool deleteFile = false}) async {
+    await platform.invokeMethod(
+        'removeDownload', {'id': id, 'deleteFile': deleteFile});
   }
 
   //Restart failed downloads
@@ -714,103 +736,90 @@ class DownloadManager {
     await platform.invokeMethod('retryDownloads');
   }
 
-  //Delete downloads by state
+  //Delete downloads by state (history cleanup; never deletes audio files)
   Future removeDownloads(DownloadState state) async {
-    await platform.invokeMethod(
-        'removeDownloads', {'state': DownloadState.values.indexOf(state)});
-  }
-}
-
-class Download {
-  int? id;
-  String? path;
-  bool? private;
-  String? trackId;
-  String? streamTrackId;
-  String? trackToken;
-  String? md5origin;
-  String? mediaVersion;
-  String? title;
-  String? image;
-  int? quality;
-  //Dynamic
-  DownloadState? state;
-  int? received;
-  int? filesize;
-
-  Download(
-      {this.id,
-      this.path,
-      this.private,
-      this.trackId,
-      this.streamTrackId,
-      this.trackToken,
-      this.md5origin,
-      this.mediaVersion,
-      this.title,
-      this.image,
-      this.state,
-      this.received,
-      this.filesize,
-      this.quality});
-
-  //Get progress between 0 - 1
-  double get progress {
-    return ((received?.toDouble() ?? 0.0) / (filesize?.toDouble() ?? 1.0))
-        .toDouble();
+    await platform.invokeMethod('removeDownloads', {'state': state.index});
   }
 
-  factory Download.fromJson(Map<dynamic, dynamic> data) {
-    return Download(
-        path: data['path'],
-        image: data['image'],
-        private: data['private'],
-        trackId: data['trackId'],
-        id: data['id'],
-        state: DownloadState.values[data['state']],
-        title: data['title'],
-        quality: data['quality']);
+  //Pause/resume/cancel/retry a single download
+  Future pauseDownload(int id) => platform.invokeMethod('pauseDownload', {'id': id});
+
+  Future resumeDownload(int id) => platform.invokeMethod('resumeDownload', {'id': id});
+
+  Future cancelDownload(int id, {bool deleteFile = false}) => platform
+      .invokeMethod('cancelDownload', {'id': id, 'deleteFile': deleteFile});
+
+  Future retryDownload(int id) => platform.invokeMethod('retryDownload', {'id': id});
+
+  //Queue wide controls
+  Future pauseAll() => platform.invokeMethod('pauseAll');
+
+  Future resumeAll() async {
+    await updateServiceSettings();
+    await platform.invokeMethod('resumeAll');
   }
 
-  //Change values from "update json"
-  void updateFromJson(Map<dynamic, dynamic> data) {
-    quality = data['quality'];
-    received = data['received'] ?? 0;
-    state = DownloadState.values[data['state']];
-    //Prevent null division later
-    filesize = ((data['filesize'] ?? 0) <= 0) ? 1 : (data['filesize'] ?? 1);
+  //Priority (0 high, 1 normal, 2 low) and manual ordering
+  Future setPriority(int id, DownloadPriority priority) => platform
+      .invokeMethod('setDownloadPriority', {'id': id, 'priority': priority.value});
+
+  /// Move [id] in front of [beforeId] (0 = move to the front of the queue).
+  Future moveDownload(int id, {int beforeId = 0}) => platform
+      .invokeMethod('moveDownload', {'id': id, 'beforeId': beforeId});
+
+  /// Enqueue downloads and report which ones were added, already present or requeued.
+  Future<DownloadEnqueueResult> enqueue(List<Map> downloads) async {
+    final dynamic result = await platform.invokeMethod('addDownloads', downloads);
+    await start();
+    return DownloadEnqueueResult.fromJson(result);
   }
 
-  //Track to download JSON for service
-  static Future<Map> jsonFromTrack(Track t, String path,
-      {private = true, AudioQuality? quality}) async {
-    //Get download info
-    if (t.playbackDetails?.isEmpty ?? true) {
-      t = await deezerAPI.track(t.id ?? '');
+  /// Aggregate overview for the Downloads screen.
+  Future<DownloadSummary> getSummary() async {
+    return DownloadSummary.from(await getDownloads());
+  }
+
+  /// Free space on the destination volume in bytes (-1 when unknown).
+  Future<int> freeDiskSpaceBytes() async {
+    try {
+      double? megabytes = await DiskSpacePlus.getFreeDiskSpace;
+      if (megabytes == null) return -1;
+      return (megabytes * 1024 * 1024).round();
+    } catch (_) {
+      return -1;
     }
-
-    // Select playbackDetails for audio stream
-    List<dynamic>? playbackDetails =
-        t.playbackDetailsFallback?.isNotEmpty == true
-            ? t.playbackDetailsFallback
-            : t.playbackDetails;
-
-    return {
-      'private': private,
-      'trackId': t.id,
-      'streamTrackId': t.fallback?.id ?? t.id,
-      'md5origin': playbackDetails?[0],
-      'mediaVersion': playbackDetails?[1],
-      'trackToken': playbackDetails?[2],
-      'quality': private
-          ? settings.getQualityInt(settings.offlineQuality)
-          : settings.getQualityInt((quality ?? settings.downloadQuality)),
-      'title': t.title,
-      'path': path,
-      'image': t.albumArt?.thumb
-    };
   }
 }
 
-//Has to be same order as in java
-enum DownloadState { NONE, DOWNLOADING, POST, DONE, DEEZER_ERROR, ERROR }
+
+/// Build the payload the native service needs to download [t].
+///
+/// Lives here (not on the model) because it needs the Deezer API and the user settings.
+Future<Map> downloadJsonFromTrack(Track t, String path,
+    {private = true, AudioQuality? quality}) async {
+  //Get download info
+  if (t.playbackDetails?.isEmpty ?? true) {
+    t = await deezerAPI.track(t.id ?? '');
+  }
+
+  // Select playbackDetails for audio stream
+  List<dynamic>? playbackDetails =
+      t.playbackDetailsFallback?.isNotEmpty == true
+          ? t.playbackDetailsFallback
+          : t.playbackDetails;
+
+  return {
+    'private': private,
+    'trackId': t.id,
+    'streamTrackId': t.fallback?.id ?? t.id,
+    'md5origin': playbackDetails?[0],
+    'mediaVersion': playbackDetails?[1],
+    'trackToken': playbackDetails?[2],
+    'quality': private
+        ? settings.getQualityInt(settings.offlineQuality)
+        : settings.getQualityInt((quality ?? settings.downloadQuality)),
+    'title': t.title,
+    'path': path,
+    'image': t.albumArt?.thumb
+  };
+}

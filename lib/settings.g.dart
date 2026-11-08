@@ -32,6 +32,9 @@ Settings _$SettingsFromJson(Map<String, dynamic> json) => Settings(
       ..albumDiscFolder = json['albumDiscFolder'] as bool? ?? false
       ..overwriteDownload = json['overwriteDownload'] as bool? ?? false
       ..downloadThreads = (json['downloadThreads'] as num?)?.toInt() ?? 2
+      ..downloadMaxRetries = (json['downloadMaxRetries'] as num?)?.toInt() ?? 4
+      ..downloadNotifications =
+          json['downloadNotifications'] as String? ?? 'summary'
       ..playlistFolder = json['playlistFolder'] as bool? ?? false
       ..downloadLyrics = json['downloadLyrics'] as bool? ?? true
       ..trackCover = json['trackCover'] as bool? ?? false
@@ -104,6 +107,8 @@ Map<String, dynamic> _$SettingsToJson(Settings instance) => <String, dynamic>{
       'albumDiscFolder': instance.albumDiscFolder,
       'overwriteDownload': instance.overwriteDownload,
       'downloadThreads': instance.downloadThreads,
+      'downloadMaxRetries': instance.downloadMaxRetries,
+      'downloadNotifications': instance.downloadNotifications,
       'playlistFolder': instance.playlistFolder,
       'downloadLyrics': instance.downloadLyrics,
       'trackCover': instance.trackCover,

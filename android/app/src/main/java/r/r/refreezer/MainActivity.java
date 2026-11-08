@@ -73,44 +73,73 @@ public class MainActivity extends AudioServiceActivity {
         //Flutter method channel
         new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), CHANNEL).setMethodCallHandler(((call, result) -> {
 
-            //Add downloads to DB, then refresh service
+            //Add downloads to DB, then refresh service.
+            //Returns {added, existing, requeued} so the UI can report duplicates truthfully.
             if (call.method.equals("addDownloads")) {
                 ArrayList<HashMap<?,?>> downloads = call.arguments();
 
                 if (downloads != null) {
-                    //TX
+                    int added = 0, existing = 0, requeued = 0;
                     db.beginTransaction();
-                    for (int i = 0; i < downloads.size(); i++) {
-                        //Check if exists
-                        Cursor cursor = db.rawQuery("SELECT id, state, quality FROM Downloads WHERE trackId == ? AND path == ?",
-                                new String[]{(String) downloads.get(i).get("trackId"), (String) downloads.get(i).get("path")});
-                        if (cursor.getCount() > 0) {
-                            //If done or error, set state to NONE - they should be skipped because file exists
-                            cursor.moveToNext();
-                            if (cursor.getInt(1) >= 3) {
-                                ContentValues values = new ContentValues();
-                                values.put("state", 0);
-                                values.put("quality", cursor.getInt(2));
-                                db.update("Downloads", values, "id == ?", new String[]{Integer.toString(cursor.getInt(0))});
-                                Log.d("INFO", "Already exists in DB, updating to none state!");
-                            } else {
-                                Log.d("INFO", "Already exits in DB!");
-                            }
-                            cursor.close();
-                            continue;
-                        }
-                        cursor.close();
+                    try {
+                        for (int i = 0; i < downloads.size(); i++) {
+                            HashMap<?,?> data = downloads.get(i);
+                            String trackId = (String) data.get("trackId");
+                            String path = (String) data.get("path");
+                            int quality = data.get("quality") == null
+                                    ? 0 : ((Number) data.get("quality")).intValue();
 
-                        //Insert
-                        ContentValues row = Download.flutterToSQL(downloads.get(i));
-                        db.insert("Downloads", null, row);
+                            //Duplicate check on the full identity (track + destination + quality).
+                            Cursor cursor = db.rawQuery(
+                                    "SELECT id, state FROM Downloads WHERE trackId == ? AND path == ? AND quality == ?",
+                                    new String[]{trackId, path, Integer.toString(quality)});
+                            try {
+                                if (cursor.moveToNext()) {
+                                    int id = cursor.getInt(0);
+                                    Download.DownloadState state =
+                                            Download.DownloadState.fromValue(cursor.getInt(1));
+                                    if (state == Download.DownloadState.ERROR
+                                            || state == Download.DownloadState.DEEZER_ERROR
+                                            || state == Download.DownloadState.CANCELLED) {
+                                        //User asked again for something that failed: requeue it.
+                                        ContentValues values = new ContentValues();
+                                        values.put("state", Download.DownloadState.NONE.getValue());
+                                        values.put("attempts", 0);
+                                        values.put("nextRetryAt", 0);
+                                        values.putNull("errorKind");
+                                        values.putNull("errorMessage");
+                                        values.putNull("metadataWarning");
+                                        db.update("Downloads", values, "id == ?",
+                                                new String[]{Integer.toString(id)});
+                                        requeued++;
+                                    } else {
+                                        //Queued, downloading or done: never duplicate the job.
+                                        existing++;
+                                    }
+                                    continue;
+                                }
+                            } finally {
+                                cursor.close();
+                            }
+
+                            ContentValues row = Download.flutterToSQL(data);
+                            db.insert("Downloads", null, row);
+                            added++;
+                        }
+                        db.setTransactionSuccessful();
+                    } catch (Exception e) {
+                        Log.e("ERR", "Error adding downloads: " + e);
+                    } finally {
+                        db.endTransaction();
                     }
-                    db.setTransactionSuccessful();
-                    db.endTransaction();
                     //Update service
                     sendMessage(DownloadService.SERVICE_LOAD_DOWNLOADS, null);
 
-                    result.success(null);
+                    HashMap<String, Object> summary = new HashMap<>();
+                    summary.put("added", added);
+                    summary.put("existing", existing);
+                    summary.put("requeued", requeued);
+                    result.success(summary);
                     return;
                 }
             }
@@ -156,11 +185,66 @@ public class MainActivity extends AudioServiceActivity {
                 result.success(null);
                 return;
             }
-            //Remove download
+            //Remove download (deleteFile false keeps the audio file on disk)
             if (call.method.equals("removeDownload")) {
                 Bundle bundle = new Bundle();
                 bundle.putInt("id", (int)call.argument("id"));
+                Boolean deleteFile = call.argument("deleteFile");
+                bundle.putBoolean("deleteFile", deleteFile != null && deleteFile);
                 sendMessage(DownloadService.SERVICE_REMOVE_DOWNLOAD, bundle);
+                result.success(null);
+                return;
+            }
+            //Pause a single download
+            if (call.method.equals("pauseDownload")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                sendMessage(DownloadService.SERVICE_PAUSE_DOWNLOAD, bundle);
+                result.success(null);
+                return;
+            }
+            //Resume a single download
+            if (call.method.equals("resumeDownload")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                sendMessage(DownloadService.SERVICE_RESUME_DOWNLOAD, bundle);
+                result.success(null);
+                return;
+            }
+            //Cancel a single download, keeping it in the history
+            if (call.method.equals("cancelDownload")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                Boolean deleteFile = call.argument("deleteFile");
+                bundle.putBoolean("deleteFile", deleteFile != null && deleteFile);
+                sendMessage(DownloadService.SERVICE_CANCEL_DOWNLOAD, bundle);
+                result.success(null);
+                return;
+            }
+            //Retry a single download
+            if (call.method.equals("retryDownload")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                sendMessage(DownloadService.SERVICE_RETRY_DOWNLOAD, bundle);
+                result.success(null);
+                return;
+            }
+            //Change the priority of a queued download (0 high, 1 normal, 2 low)
+            if (call.method.equals("setDownloadPriority")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                bundle.putInt("priority", (int)call.argument("priority"));
+                sendMessage(DownloadService.SERVICE_SET_PRIORITY, bundle);
+                result.success(null);
+                return;
+            }
+            //Move a queued download before another one (beforeId 0 = move to front)
+            if (call.method.equals("moveDownload")) {
+                Bundle bundle = new Bundle();
+                bundle.putInt("id", (int)call.argument("id"));
+                Integer beforeId = call.argument("beforeId");
+                bundle.putInt("beforeId", beforeId == null ? 0 : beforeId);
+                sendMessage(DownloadService.SERVICE_MOVE_DOWNLOAD, bundle);
                 result.success(null);
                 return;
             }
@@ -170,11 +254,23 @@ public class MainActivity extends AudioServiceActivity {
                 result.success(null);
                 return;
             }
-            //Remove downloads by state
+            //Remove downloads by state (history cleanup: never deletes audio files)
             if (call.method.equals("removeDownloads")) {
                 Bundle bundle = new Bundle();
                 bundle.putInt("state", (int)call.argument("state"));
                 sendMessage(DownloadService.SERVICE_REMOVE_DOWNLOADS, bundle);
+                result.success(null);
+                return;
+            }
+            //Pause the whole queue
+            if (call.method.equals("pauseAll")) {
+                sendMessage(DownloadService.SERVICE_STOP_DOWNLOADS, new Bundle());
+                result.success(null);
+                return;
+            }
+            //Resume the whole queue
+            if (call.method.equals("resumeAll")) {
+                sendMessage(DownloadService.SERVICE_START_DOWNLOAD, new Bundle());
                 result.success(null);
                 return;
             }
@@ -362,6 +458,7 @@ public class MainActivity extends AudioServiceActivity {
                                 out.put("received", bundle.getLong("received"));
                                 out.put("filesize", bundle.getLong("filesize"));
                                 out.put("quality", bundle.getInt("quality"));
+                                out.put("speed", bundle.getLong("speed"));
                                 data.add(out);
                             }
                             //Wrapper
@@ -379,6 +476,14 @@ public class MainActivity extends AudioServiceActivity {
                         HashMap<String, Object> out = new HashMap<>();
                         out.put("running", b.getBoolean("running"));
                         out.put("queueSize", b.getInt("queueSize"));
+                        out.put("active", b.getInt("active"));
+                        out.put("paused", b.getInt("paused"));
+                        out.put("failed", b.getInt("failed"));
+                        out.put("completed", b.getInt("completed"));
+                        out.put("cancelled", b.getInt("cancelled"));
+                        out.put("totalBytes", b.getLong("totalBytes"));
+                        out.put("doneBytes", b.getLong("doneBytes"));
+                        out.put("blockReason", b.getString("blockReason"));
 
                         //Wrapper info
                         out.put("action", "onStateChange");
