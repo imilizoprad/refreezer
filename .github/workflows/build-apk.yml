@@ -492,6 +492,7 @@ jobs:
         if: success() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           [ -n "${PR_NUMBER:-}" ] || { echo "No pull request number; nothing to publish."; exit 0; }
