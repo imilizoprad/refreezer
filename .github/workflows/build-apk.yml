@@ -272,18 +272,27 @@ jobs:
         run: |
           # scrobblenaut/json_serializable models ship without their *.g.dart files, so the app
           # does not compile until each path dependency runs its own build_runner.
-          set -euo pipefail
+          set -uo pipefail
+          status=0
           for pkg in custom_navigator equalizer_flutter external_path move_to_background scrobblenaut; do
             [ -f "$pkg/pubspec.yaml" ] || continue
-            if grep -qE 'build_runner|json_serializable' "$pkg/pubspec.yaml"; then
-              echo "--- codegen for $pkg"
-              ( cd "$pkg" && flutter pub get && dart run build_runner build --delete-conflicting-outputs ) \
-                2>&1 | tee -a "$LOG_DIR/codegen-$pkg.log"
-              generated=$(find "$pkg/lib" -name '*.g.dart' | wc -l)
-              echo "$pkg generated $generated .g.dart file(s)"
-              [ "$generated" -gt 0 ] || { echo "::error::no generated code in $pkg"; exit 1; }
+            grep -qE 'build_runner|json_serializable' "$pkg/pubspec.yaml" || continue
+            echo "--- codegen for $pkg"
+            if ( cd "$pkg" && flutter pub get && dart run build_runner build ) \
+                2>&1 | tee "$LOG_DIR/codegen-$pkg.log"; then
+              echo "$pkg: build_runner succeeded"
+            else
+              echo "::error::codegen failed for $pkg"
+              status=1
+            fi
+            generated=$(find "$pkg/lib" -name '*.g.dart' | wc -l)
+            echo "$pkg: $generated generated .g.dart file(s)"
+            if [ "$generated" -eq 0 ]; then
+              echo "::error::no generated code for $pkg"
+              status=1
             fi
           done
+          exit $status
 
       - name: Generate code (Envied + json_serializable)
         run: dart run build_runner build --delete-conflicting-outputs 2>&1 | tee "$LOG_DIR/build-runner.log"
@@ -364,10 +373,11 @@ jobs:
             echo "Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null)"
             echo "Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
             echo ""
-            for f in build-apk build-runner pub-get analyze test; do
-              log="$LOG_DIR/$f.log"
-              [ -f "$log" ] || continue
-              echo "<details><summary><code>$f.log</code> (last 120 lines)</summary>"
+          # Most recently modified first: the log of the step that just failed comes first, so it is
+          # not lost when the payload is trimmed below.
+          for log in $(ls -t "$LOG_DIR"/*.log 2>/dev/null); do
+            f=$(basename "$log" .log)
+              echo "<details><summary><code>$f.log</code> (errors + last 60 lines)</summary>"
               echo ""
               echo '```'
               grep -iE "error|FAILURE|Exception|failed|Cannot|not found|Unsupported|requires|warning: " "$log" | tail -60
