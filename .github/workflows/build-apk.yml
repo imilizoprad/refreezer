@@ -15,9 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       flutter_version:
-        description: 'Flutter version (leave empty for the newest stable release the project supports, currently 3.32.x)'
+        description: 'Flutter version (pinned to the release this workflow was validated against; clear it to resolve the newest stable release)'
         required: false
-        default: ''
+        default: '3.47.9'
       build_mode:
         description: 'Build mode'
         required: true
@@ -100,6 +100,48 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
 
+      - name: Patch pinned submodules for the current toolchain
+        run: |
+          # Both submodules are pinned to third-party commits that predate the Flutter/Dart
+          # versions used here. The patches are minimal, idempotent and stay inside the runner's
+          # checkout (they are never committed).
+          set -euo pipefail
+
+          # 1. WidgetsBindingObserver gained handleStatusBarTap(); custom_navigator implements the
+          #    interface explicitly and therefore has to provide it too.
+          cnav=custom_navigator/lib/custom_navigator.dart
+          if [ -f "$cnav" ] && ! grep -q 'handleStatusBarTap' "$cnav"; then
+            python3 - "$cnav" <<'EOF'
+          import sys
+          path = sys.argv[1]
+          text = open(path).read().rstrip()
+          assert text.endswith('}')
+          stub = '''
+            // Added by the build workflow: WidgetsBindingObserver declares handleStatusBarTap() in
+            // current Flutter releases and this class implements the interface explicitly.
+            @override
+            void handleStatusBarTap() {}
+          '''
+          open(path, 'w').write(text[:-1].rstrip() + '\n' + stub + '}\n')
+          EOF
+            echo "custom_navigator: added handleStatusBarTap()"
+          fi
+
+          # 2. scrobblenaut declares a 3.0 language version, but json_serializable >= 6.10 emits
+          #    null-aware elements (Dart 3.9+) into its generated code, which the formatter then
+          #    rejects for a 3.0 package. Raising the floor is enough to unblock codegen.
+          sp=scrobblenaut/pubspec.yaml
+          if [ -f "$sp" ]; then
+            python3 - "$sp" <<'EOF'
+          import re, sys
+          path = sys.argv[1]
+          text = open(path).read()
+          text = re.sub(r'(?m)^(\s*sdk:\s*).*$', r'\1">=3.9.0 <4.0.0"', text, count=1)
+          open(path, 'w').write(text)
+          EOF
+            grep -n 'sdk:' scrobblenaut/pubspec.yaml | head -2
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -110,11 +152,8 @@ jobs:
         id: flutter-version
         env:
           REQUESTED: ${{ inputs.flutter_version }}
-          # Flutter 3.35 renamed the material theme classes (`BottomAppBarTheme` ->
-          # `BottomAppBarThemeData`), which lib/settings.dart still uses, and the pinned
-          # custom_navigator submodule no longer satisfies NavigatorState on newer releases.
-          # Resolve the newest stable release below 3.35.0 instead of hardcoding a patch version.
-          FLUTTER_CEILING: '3.35.0'
+          # Empty ceiling = newest stable release. Set e.g. 3.36.0 to stay on an older line.
+          FLUTTER_CEILING: ''
         run: |
           set -euo pipefail
           if [ -n "${REQUESTED:-}" ]; then
@@ -136,11 +175,13 @@ jobs:
                     and '-' not in r['version']]
           stable.sort(key=lambda r: r.get('release_date', ''), reverse=True)
           limit = key(ceiling)
-          candidates = [r['version'] for r in stable if key(r['version']) < limit]
-          if not candidates:
-              raise SystemExit('no stable Flutter release below %s found' % ceiling)
+          candidates = [r['version'] for r in stable
+                        if not ceiling or key(r['version']) < limit]
+          if not candidates and not ceiling:
+              raise SystemExit('the release feed returned no stable version')
           version = candidates[0]
-          print('Newest stable Flutter below', ceiling, 'is', version)
+          print('Resolved stable Flutter:', version,
+                '(ceiling: %s)' % (ceiling or 'none'))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write('version=%s\n' % version)
           EOF
