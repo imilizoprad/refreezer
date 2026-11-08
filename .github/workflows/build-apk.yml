@@ -489,11 +489,12 @@ jobs:
       - name: Publish build summary
         # Same reason as the failure diagnostics: the job log is not always reachable through the
         # API, so the facts reviewers need are posted on the pull request.
-        if: success() && github.event_name == 'pull_request' && env.PR_NUMBER != ''
+        if: success() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          [ -n "${PR_NUMBER:-}" ] || { echo "No pull request number; nothing to publish."; exit 0; }
           {
             echo "### APK build succeeded"
             echo ""

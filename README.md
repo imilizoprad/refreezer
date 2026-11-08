@@ -6,6 +6,7 @@
 [![Downloads Total](https://img.shields.io/github/downloads/DJDoubleD/ReFreezer/total?color=blue&label=downloads%20total)](../../releases)
 [![Flutter Version](https://shields.io/badge/Flutter-v3.32.2-darkgreen.svg)](https://docs.flutter.dev/tools/sdk)
 [![Dart Version](https://shields.io/badge/Dart-v3.8.1-darkgreen.svg)](https://dart.dev/get-dart)
+[![Build APK](../../actions/workflows/build-apk.yml/badge.svg)](../../actions/workflows/build-apk.yml)
 [![Crowdin](https://badges.crowdin.net/refreezer/localized.svg)](https://crowdin.com/project/refreezer)
 [![License](https://img.shields.io/github/license/DJDoubleD/ReFreezer?flat)](./LICENSE)
 
@@ -17,6 +18,10 @@
 
 An alternative Deezer music streaming & downloading client, based on Freezer.
 The entire codebase has been updated/rewritten to be compatible with the latest version of flutter, the dart SDK & android (current build target is API level 34).
+
+**Prebuilt APK:** GitHub Actions builds an installable arm64-v8a release APK
+(`ReFreezer-arm64-v8a-release` artifact on the [Build APK workflow](../../actions/workflows/build-apk.yml)).
+Build inputs, signing and download instructions are in [`BUILD_APK.md`](./BUILD_APK.md).
 
 ## Screenshots
 
