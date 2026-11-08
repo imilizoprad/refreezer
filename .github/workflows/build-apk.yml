@@ -1,0 +1,269 @@
+name: Build APK (arm64-v8a)
+
+# Builds an installable, arm64-v8a only release APK.
+#
+# Why this workflow exists:
+#   - the repository has no CI and no reproducible build (empty submodules on a plain clone,
+#     missing lib/.env, gradle wrapper intentionally git-ignored), so nothing could be verified
+#     automatically;
+#   - this workflow materialises everything the build needs on a clean GitHub runner.
+#
+# Trigger it manually (Actions -> Build APK -> Run workflow), or push a tag (v*).
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: 'Flutter version (leave empty for latest stable)'
+        required: false
+        default: ''
+      build_mode:
+        description: 'Build mode'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      abi:
+        description: 'Target ABI'
+        required: true
+        default: 'arm64-v8a'
+        type: choice
+        options:
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+          - fat
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/build-apk.yml'
+      - 'pubspec.yaml'
+      - 'lib/**'
+      - 'android/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: APK (${{ inputs.build_mode || 'release' }}, ${{ inputs.abi || 'arm64-v8a' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    env:
+      # Injected from repository secrets; empty falls back to compile-only placeholders.
+      DEEZER_CLIENT_ID: ${{ secrets.DEEZER_CLIENT_ID }}
+      DEEZER_CLIENT_SECRET: ${{ secrets.DEEZER_CLIENT_SECRET }}
+      LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+      LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+      # Optional signing secrets. Without them an ephemeral CI key is generated.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      NDK_VERSION: '27.0.12077973'
+      BUILD_MODE: ${{ inputs.build_mode || 'release' }}
+      ABI: ${{ inputs.abi || 'arm64-v8a' }}
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify path dependencies (submodules) are present
+        run: |
+          set -euo pipefail
+          missing=0
+          for m in custom_navigator equalizer_flutter external_path move_to_background scrobblenaut; do
+            if [ -z "$(ls -A "$m" 2>/dev/null)" ]; then
+              echo "::error::submodule '$m' is empty"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter_version || '' }}
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Set up Android SDK (platform 35 + NDK)
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}" > /dev/null
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Create lib/.env (Envied source)
+        run: |
+          set -euo pipefail
+          if [ -n "${DEEZER_CLIENT_ID:-}" ]; then
+            echo "Using repository secrets for API keys."
+          else
+            echo "::warning::No DEEZER_CLIENT_ID secret set - using placeholders. The APK builds, but Deezer login will not work."
+          fi
+          {
+            echo "deezerClientId=${DEEZER_CLIENT_ID:-000000}"
+            echo "deezerClientSecret=${DEEZER_CLIENT_SECRET:-placeholder_deezer_secret}"
+            echo "lastFmApiKey=${LASTFM_API_KEY:-placeholder_lastfm_key}"
+            echo "lastFmApiSecret=${LASTFM_API_SECRET:-placeholder_lastfm_secret}"
+          } > lib/.env
+          echo "wrote lib/.env with $(wc -l < lib/.env) lines"
+
+      - name: Ensure Gradle wrapper (git-ignored upstream)
+        run: |
+          # android/gradlew and the wrapper jar are excluded by android/.gitignore upstream, so a
+          # fresh clone has none. Flutter injects them during build; this step makes it explicit and
+          # never fails the job on its own.
+          if [ -x android/gradlew ]; then
+            echo "Wrapper already present."
+            exit 0
+          fi
+          {
+            echo "flutter.sdk=${FLUTTER_ROOT}"
+            echo "sdk.dir=${ANDROID_SDK_ROOT}"
+          } > android/local.properties
+
+          if command -v gradle > /dev/null 2>&1; then
+            (cd android && gradle wrapper --gradle-version 8.12 --distribution-type bin) || true
+          fi
+          if [ ! -x android/gradlew ]; then
+            echo "Gradle CLI unavailable - fetching the wrapper from the Gradle repository."
+            curl -fsSL -o android/gradlew https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradlew || true
+            mkdir -p android/gradle/wrapper
+            curl -fsSL -o android/gradle/wrapper/gradle-wrapper.jar \
+              https://raw.githubusercontent.com/gradle/gradle/v8.12.0/gradle/wrapper/gradle-wrapper.jar || true
+          fi
+          chmod +x android/gradlew 2>/dev/null || true
+          ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null \
+            || echo "Still missing - Flutter will inject the wrapper during build."
+
+      - name: Configure release signing
+        run: |
+          set -euo pipefail
+          cd android
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "Using the signing keystore from repository secrets."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+            {
+              echo "storeFile=release.keystore"
+              echo "keyAlias=${ANDROID_KEY_ALIAS:-upload}"
+              echo "keyPassword=${ANDROID_KEY_PASSWORD:-}"
+              echo "storePassword=${ANDROID_KEYSTORE_PASSWORD:-}"
+            } > key.properties
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - generating an ephemeral CI key. The APK installs, but cannot update an app signed with another key."
+            PASSWORD="$(openssl rand -hex 16)"
+            echo "::add-mask::$PASSWORD"
+            keytool -genkeypair -v \
+              -keystore app/ci-release.jks -storetype JKS \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias ci -storepass "$PASSWORD" -keypass "$PASSWORD" \
+              -dname "CN=ReFreezer CI, OU=CI, O=CI, L=CI, S=CI, C=US" > /dev/null
+            {
+              echo "storeFile=ci-release.jks"
+              echo "keyAlias=ci"
+              echo "keyPassword=$PASSWORD"
+              echo "storePassword=$PASSWORD"
+            } > key.properties
+          fi
+          ls -la app | grep -Ei 'keystore|\.jks' || true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Generate code (Envied + json_serializable)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Analyze (non-blocking)
+        continue-on-error: true
+        run: flutter analyze --no-pub
+
+      - name: Unit tests (non-blocking)
+        continue-on-error: true
+        run: flutter test --no-pub --reporter expanded
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          case "$ABI" in
+            arm64-v8a)   TARGET=android-arm64 ;;
+            armeabi-v7a) TARGET=android-arm ;;
+            x86_64)      TARGET=android-x64 ;;
+            fat)         TARGET="android-arm,android-arm64,android-x64" ;;
+            *)           echo "::error::unknown ABI $ABI"; exit 1 ;;
+          esac
+
+          ARGS="--$BUILD_MODE --target-platform $TARGET"
+          if [ "$ABI" != "fat" ]; then
+            ARGS="$ARGS --split-per-abi"
+          fi
+          echo "flutter build apk $ARGS"
+          flutter build apk $ARGS
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          shopt -s nullglob
+          files=(build/app/outputs/flutter-apk/*.apk)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no APK produced"
+            ls -la build/app/outputs/flutter-apk || true
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "produced: $f ($(du -h "$f" | cut -f1))"
+            cp "$f" out/
+          done
+          if [ -f out/app-arm64-v8a-release.apk ]; then
+            cp out/app-arm64-v8a-release.apk "out/ReFreezer-$ABI-$BUILD_MODE.apk"
+          elif [ -f out/app-release.apk ]; then
+            cp out/app-release.apk "out/ReFreezer-$ABI-$BUILD_MODE.apk"
+          fi
+          (cd out && sha256sum *.apk | tee SHA256SUMS.txt)
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReFreezer-${{ env.ABI }}-${{ env.BUILD_MODE }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### APK build"
+            echo ""
+            echo "- Flutter: $(flutter --version 2>/dev/null | head -1 || echo n/a)"
+            echo "- Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            if [ -f out/SHA256SUMS.txt ]; then
+              echo ""
+              echo '```'
+              cat out/SHA256SUMS.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
