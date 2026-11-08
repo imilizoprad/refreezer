@@ -9,9 +9,12 @@ that preparation on a clean GitHub runner and produces an installable, arm64-v8a
 | Item | Value |
 | --- | --- |
 | Workflow | `.github/workflows/build-apk.yml` — "Build APK (arm64-v8a)" |
-| Last verified run | [run 42511765494](https://github.com/imilizoprad/refreezer/actions/runs/42511765494) — **success** |
-| Artifact | `ReFreezer-arm64-v8a-release` (APK + `SHA256SUMS.txt`, 30 days) |
+| Last verified run | [run 42517164969](https://github.com/imilizoprad/refreezer/actions/runs/42517164969) — **success** (`608b3f7`) |
+| Artifact | `ReFreezer-arm64-v8a-release` — 41.97 MB zip containing the APK + `SHA256SUMS.txt`, kept 30 days |
 | APK inside the artifact | `ReFreezer-arm64-v8a-release.apk` |
+| APK SHA-256 | `6e6f84fa6a7160acb8589c03709f94b7fdee458b6ea8e9bbc524cf8fbb63c1ea` |
+| `flutter test` | exit 0 — all 33 tests pass |
+| `flutter analyze` | exit 1 — 64 findings, all `info` (lints in `lib/api/definitions.dart`, `Color.value` and `ConcatenatingAudioSource` deprecations); no errors or warnings, and analysis does not gate the APK |
 | Build command | `flutter build apk --release --target-platform android-arm64` (single ABI, no `--split-per-abi`) |
 
 ## Getting the APK
