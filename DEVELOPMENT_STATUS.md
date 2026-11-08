@@ -66,7 +66,7 @@ Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs inpu
 
 | Check | Tool | Result |
 |---|---|---|
-| Dart syntax, all `lib/**` + `test/**` | `tree_sitter` + locally compiled `tree-sitter-dart` grammar | 55 files parsed; **3 errors, all pre-existing** (`lib/fonts/refreezer_icons.dart:16`, `lib/utils/app_icon_changer.dart:19`, `lib/utils/version.dart:28`). No new syntax errors. |
+| Dart syntax, all `lib/**` + `test/**` | `tree_sitter` + locally compiled `tree-sitter-dart` grammar (1.0.0) | 55 files parsed; no new errors. The grammar reports 3 pre-existing failures that are **valid Dart 3 constructs it cannot parse**: `library;` (unnamed library directive) in `lib/fonts/refreezer_icons.dart:16` and `lib/utils/version.dart:28`, and an enhanced enum in `lib/utils/app_icon_changer.dart:19`. Consequence: the harness cannot validate files using those two constructs, so new code avoids them deliberately. |
 | Java syntax, all `android/**/*.java` | `javalang` | 13 files, 0 parse errors |
 | Semantic compile (`javac`/`dart analyze`) | — | **BLOCKED** — no JDK/Dart/Flutter |
 | Unit tests | — | **BLOCKED** — no Dart/Flutter; tests are unrun |

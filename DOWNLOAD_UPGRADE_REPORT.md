@@ -199,7 +199,7 @@ instrumentation tests for the queue state machine plus a fake HTTP server for re
 
 | Command | Result |
 |---|---|
-| `python /tmp/dartgram/parse.py $(find lib test -name '*.dart')` | 55 files parsed, **3 errors — all pre-existing** (`refreezer_icons.dart:16`, `app_icon_changer.dart:19`, `version.dart:28`) |
+| `python /tmp/dartgram/parse.py $(find lib test -name '*.dart')` | 55 files parsed, no new errors. 3 pre-existing reports are valid Dart 3 syntax the pinned grammar cannot parse: `library;` (`refreezer_icons.dart:16`, `version.dart:28`) and an enhanced enum (`app_icon_changer.dart:19`). New code avoids both constructs so it stays verifiable. |
 | `python /tmp/parsejava.py $(find android -name '*.java')` | 13 files, **0 errors** |
 | `flutter analyze` / `dart format` / `flutter test` / `flutter build apk` | **not run** — toolchain unavailable |
 | Device/emulator | **none** |
