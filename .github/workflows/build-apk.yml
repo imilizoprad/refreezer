@@ -507,6 +507,16 @@ jobs:
             echo '```'
             cat out/SHA256SUMS.txt 2>/dev/null || echo 'no checksums'
             echo '```'
+            if [ -f "$LOG_DIR/analyze.log" ]; then
+              echo ""
+              echo "<details><summary>\`flutter analyze\` (exit ${ANALYZE_STATUS:-not run})</summary>"
+              echo ""
+              echo '```'
+              grep -E '^\s*(error|warning|info) •' "$LOG_DIR/analyze.log" | head -15
+              tail -2 "$LOG_DIR/analyze.log"
+              echo '```'
+              echo "</details>"
+            fi
           } > /tmp/build-summary.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/build-summary.md \
             || echo "Could not post the build summary."
