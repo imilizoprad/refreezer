@@ -411,8 +411,9 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       return _errorState(context);
     }
 
-    return DraggableScrollbarWrapper(
+    return DraggableScrollbar.rrect(
       controller: _scrollController,
+      backgroundColor: Theme.of(context).primaryColor,
       child: ListView(
         controller: _scrollController,
         children: <Widget>[
@@ -915,23 +916,6 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   }
 }
 
-/// Simple wrapper that keeps the scrollbar of the app style in one place.
-class DraggableScrollbarWrapper extends StatelessWidget {
-  final ScrollController controller;
-  final Widget child;
-
-  const DraggableScrollbarWrapper({super.key, required this.controller, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return DraggableScrollbar.rrect(
-      controller: controller,
-      backgroundColor: Theme.of(context).primaryColor,
-      child: child,
-    );
-  }
-}
-
 /// One queue row: artwork, title, state line, progress and actions.
 ///
 /// Uses the same geometry as [TrackTile] (48px artwork, ListTile padding) so the list looks like
@@ -993,7 +977,7 @@ class _DownloadRow extends StatelessWidget {
   IconData get _trailingIcon {
     if (download.state.isActive) return Icons.pause;
     if (download.state.isDone) return Icons.download_done;
-    if (download.state.isPaused) return Icons.paused;
+    if (download.state.isPaused) return Icons.pause_circle_outline;
     if (download.state.isFailed) return Icons.error_outline;
     if (download.state.isCancelled) return Icons.cancel_outlined;
     if (download.state == DownloadState.POST) return Icons.autorenew;
