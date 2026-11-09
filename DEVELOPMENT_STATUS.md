@@ -15,11 +15,11 @@ Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs inpu
 | Phase | Scope | Status |
 |---|---|---|
 | 0 — Inspect & baseline | Re-read the native downloader, Dart layer, DB schema, channel protocol; baseline the syntax harness | **DONE** |
-| 1 — Foundation | State model (append-only), DB v2 migration, `Download` model, `DownloadController`, design tokens | **DONE (static) / UNVERIFIED (runtime)** |
+| 1 — Foundation | State model (append-only), DB v2 migration, `Download` model, `DownloadController` | **DONE / compiled by CI** |
 | 2 — Downloader reliability & speed | Safe finalisation, validated resume, retry classification + backoff, auth/storage/unavailable separation, temp-file lifecycle, orphan cleanup, idle-only service shutdown | **DONE (static) / UNVERIFIED (runtime)** |
 | 3 — Queue & management | Priority, ordering/move-to-front, pause/resume per job and queue-wide, cancel, retry one/all, history cleanup without file deletion, duplicate prevention | **DONE (static) / UNVERIFIED (runtime)** |
-| 4 — Design system | Tokens (obsidian/editorial), typography scale, progress rule, status, buttons, empty/error/loading states, sheets, filter bar, search field; reduced-motion support | **DONE** |
-| 5 — Full UI/UX | Downloads screen rebuilt; Settings: retry + notification controls | **IN PROGRESS** — Downloads is the redesigned screen; Home/Player/Search/Library redesigns are **not** part of this pass |
+| 4 — Design system | **Superseded**: an app-wide design system already exists (`elements.dart`, `tiles.dart`, `FreezerAppBar`, `FreezerDivider`, `MenuSheet`, `Fluttertoast`). The bespoke tokens were removed and the Downloads screen now uses the app's own widgets | **DONE** |
+| 5 — Full UI/UX | Downloads screen rebuilt in the app's design language; Settings: retry + notification controls; whole-artist download added | **DONE** for Downloads; Home/Player/Search/Library redesigns are **not** part of this pass |
 | 6 — Intelligent downloads | Notification policy (all/summary/none), priority/queue automation | **PARTIAL / UNVERIFIED** — Wi-Fi-only, charging-only, low-battery pause and "new likes / new releases" automation are **not implemented** (see §5) |
 | 7 — Polish & regression | Syntax verification, unit tests written, documentation | **IN PROGRESS** — tests written but **not executed** (no Dart/Flutter here) |
 
@@ -54,7 +54,8 @@ Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs inpu
 | Model | New `lib/api/download_models.dart` (Flutter-free): state mirror with append-only ordinals, priority, retry/ETA/speed, dedupe key, human failure copy, filters, ordering, summary, storage estimate, formatters | DONE / UNVERIFIED |
 | API | `lib/api/download.dart` re-exports the model, adds pause/resume/cancel/retry/priority/move/enqueue/summary/free-space; `removeDownload(deleteFile:)`; state-change mirror fields; `downloadJsonFromTrack` (was `Download.jsonFromTrack`) | DONE / UNVERIFIED |
 | Controller | `lib/service/download_controller.dart`: single source of truth, throttled progress merge, coalesced refresh, optimistic state changes with reload, storage estimate | DONE / UNVERIFIED |
-| Design system | `lib/ui/design/tokens.dart` + `components.dart`: obsidian/editorial palette derived from the existing theme, type scale, 4-pt spacing, hairline rules, thin progress rule, status dots, buttons without gradients, empty/error/skeleton states, bottom sheets, filter bar, underline search, confirm dialog, reduced-motion aware | DONE |
+| Downloads UI | `lib/ui/downloads_screen.dart` uses the app's own widgets: `FreezerAppBar`, `ListTile` rows with 48 px `CachedImage` artwork, `FreezerDivider`, `PopupMenuButton` filter with counts, `MenuSheet` row actions, `AlertDialog` confirmations, `Fluttertoast` feedback, `DraggableScrollbar` list. The previous `lib/ui/design/*` layer was deleted (single design system) | DONE |
+| Whole-artist download | `lib/api/download.dart` `downloadArtist()`: paginated discography + top tracks, `BatchDownloadResult` (added/existing/skipped); entry points on the artist screen and its long-press menu, with confirm + progress dialogs | DONE (not runtime-verified) |
 | Downloads screen | Rebuilt: overview header (state headline, aggregate progress, free space vs. estimate, auth/low-storage notices), filters with counts, search, grouped sections (Downloading / Queue / Needs attention / Finished), per-row status/progress/ETA/speed, pause/resume/cancel/retry/move-to-front, priority sheet, swipe pause/cancel, batch selection bar, confirmations, undo for cancel, "remove entry vs. delete file" split, empty/loading/error states | DONE / UNVERIFIED |
 | Settings | "Automatic retries" and "Download notifications" controls; settings model + generated JSON updated by hand (no `build_runner` available) and mapped to the native contract in `getServiceSettings()` | DONE / UNVERIFIED |
 
@@ -96,7 +97,7 @@ What the syntax checks do **not** prove: type correctness, API availability agai
 1. **Wi-Fi-only / charging-only / low-battery-pause** download rules: not implemented (would need a `BroadcastReceiver`/`ConnectivityManager` gate; cannot be device-verified here).
 2. **Automation for new likes / new playlist tracks / new artist releases**: not implemented.
 3. **Collection-aware download rules** (skip already-offline inside an album/playlist batch): duplicate identity is enforced per track, but the UI does not yet pre-filter a whole collection before enqueueing.
-4. **Redesign scope**: only the Downloads screen plus new design primitives. Home, Player, Search and Library are unchanged; they still use the legacy theme and widgets.
+4. **Redesign scope**: only the Downloads screen was touched, and it now follows the app's existing design language instead of a separate one. Home, Player, Search and Library are unchanged.
 5. **Undo** exists for cancelling a download (resume). Removing an entry or clearing history is confirmation-only, because the row is deleted from the native DB.
 6. **Tagging happens after final rename**: a crash during tagging could leave a partially tagged file (audio bytes intact). Tagging a staging file before rename was rejected because the tag writer may depend on the file extension; recorded as a residual risk.
 7. **TV/DPAD focus order** on the new screen is untested; rows are plain `InkWell`s so focus traversal works, but it is unverified.
@@ -112,4 +113,4 @@ What the syntax checks do **not** prove: type correctness, API availability agai
 
 1. Provide the toolchain (or run on a workstation): `flutter pub get`, `dart format`, `flutter analyze`, `flutter test` (the new tests), then `flutter build apk --debug`.
 2. Device pass: pause/resume/cancel, app kill during download (resume), expired ARL, full storage, airplane-mode retry/backoff, tag failure, duplicate enqueue, 200-vs-206 resume, notification policy.
-3. Then: collection pre-filter ("skip already offline"), Wi-Fi/charging rules, and the remaining screens' redesign on top of `RfTokens`.
+3. Then: collection pre-filter ("skip already offline") and Wi-Fi/charging download rules.

@@ -1,17 +1,22 @@
 import 'dart:async';
 
+import 'package:draggable_scrollbar/draggable_scrollbar.dart';
 import 'package:flutter/material.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 
 import '../api/download.dart';
 import '../service/download_controller.dart';
 import '../translations.i18n.dart';
-import 'design/components.dart';
-import 'design/tokens.dart';
+import 'cached_image.dart';
+import 'elements.dart';
+import 'menu.dart';
 
-/// Downloads: overview, queue control and history.
+/// Downloads: queue overview, control and history.
 ///
 /// The screen is a pure view over [DownloadController]; every action goes through it so the
-/// native queue stays the only source of truth.
+/// native queue stays the only source of truth. It deliberately uses the same widgets as the rest
+/// of the app (FreezerAppBar, ListTile rows, FreezerDivider, MenuSheet, Fluttertoast) so it does
+/// not look like a different application.
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
 
@@ -22,6 +27,7 @@ class DownloadsScreen extends StatefulWidget {
 class _DownloadsScreenState extends State<DownloadsScreen> {
   final DownloadController controller = DownloadController.instance;
   final TextEditingController _search = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
 
   DownloadFilter _filter = DownloadFilter.all;
   bool _searchOpen = false;
@@ -50,20 +56,50 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   void dispose() {
     _ticker?.cancel();
     _search.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  // --- actions ------------------------------------------------------------------------------
+  // --- helpers -------------------------------------------------------------------------------
+
+  void _toast(String message) {
+    Fluttertoast.showToast(
+      msg: message,
+      gravity: ToastGravity.BOTTOM,
+      toastLength: Toast.LENGTH_SHORT,
+    );
+  }
+
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: <Widget>[
+          TextButton(
+            child: Text('Cancel'.i18n),
+            onPressed: () => Navigator.of(context).pop(false),
+          ),
+          TextButton(
+            child: Text(confirmLabel),
+            onPressed: () => Navigator.of(context).pop(true),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
 
   void _toggleSelection(Download download) {
     if (download.id == null) return;
     setState(() {
-      if (!_selectionMode) {
-        _selectionMode = true;
-      }
-      if (!_selected.add(download.id!)) {
-        _selected.remove(download.id!);
-      }
+      if (!_selectionMode) _selectionMode = true;
+      if (!_selected.add(download.id!)) _selected.remove(download.id!);
       if (_selected.isEmpty) _selectionMode = false;
     });
   }
@@ -75,126 +111,192 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     });
   }
 
-  Future<void> _confirmClearHistory(DownloadState state) async {
-    final bool ok = await rfConfirm(
-      context,
+  List<Download> get _visible {
+    if (_filter == DownloadFilter.all && _query.isEmpty) return controller.downloads;
+    return controller.filtered(filter: _filter, query: _query);
+  }
+
+  bool get _hasResumable => controller.downloads
+      .any((d) => d.state.isPaused || d.state.isQueued || d.state.isFailed);
+
+  // --- actions -------------------------------------------------------------------------------
+
+  Future<void> _clearHistory(DownloadState state) async {
+    final bool ok = await _confirm(
       title: state == DownloadState.DONE ? 'Clear downloaded history?' : 'Clear history?',
       message: 'This only removes the entries from this list. '
           'Downloaded music stays on your device and remains available offline.',
       confirmLabel: 'Clear',
-      destructive: true,
     );
     if (!ok) return;
     await controller.clearHistory(state);
-    _snack('History cleared. Your files were not deleted.');
-  }
-
-  Future<void> _removeEntry(Download download, {bool offerDelete = false}) async {
-    if (offerDelete && download.state.isDone) {
-      final String? choice = await rfSheet<String>(
-        context,
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  RfTokens.gutter, RfTokens.s3, RfTokens.gutter, RfTokens.s2),
-              child: Text(download.title ?? 'Download', style: RfTokens.of(context).title),
-            ),
-            _sheetAction(
-              context,
-              icon: Icons.playlist_remove,
-              label: 'Remove from list, keep the file',
-              onTap: () => Navigator.of(context).pop('keep'),
-            ),
-            _sheetAction(
-              context,
-              icon: Icons.delete_outline,
-              label: 'Remove and delete the file',
-              danger: true,
-              onTap: () => Navigator.of(context).pop('delete'),
-            ),
-            const SizedBox(height: RfTokens.s3),
-          ],
-        ),
-      );
-      if (choice == null) return;
-      if (choice == 'delete') {
-        final bool ok = await rfConfirm(
-          context,
-          title: 'Delete the file?',
-          message: 'The audio file will be deleted from your device. '
-              'This cannot be undone.',
-          confirmLabel: 'Delete',
-          destructive: true,
-        );
-        if (!ok) return;
-        await controller.remove(download, deleteFile: true);
-        _snack('Entry and file removed.');
-        return;
-      }
-      await controller.remove(download);
-      _snack('Entry removed. The file was kept.');
-      return;
-    }
-    await controller.remove(download);
-    _snack('Entry removed. The file was kept.');
+    _toast('History cleared. Your files were not deleted.');
   }
 
   Future<void> _cancelWithUndo(Download download) async {
     await controller.cancel(download);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('Download cancelled.'),
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text('Download cancelled.'.i18n),
         action: SnackBarAction(
           label: 'Undo'.i18n,
           onPressed: () => controller.resume(download),
         ),
         behavior: SnackBarBehavior.floating,
+      ));
+  }
+
+  Future<void> _primaryAction(Download download) async {
+    if (download.state.isActive) {
+      await controller.pause(download);
+      _toast('Download paused.'.i18n);
+      return;
+    }
+    if (download.state.isPaused) {
+      await controller.resume(download);
+      _toast('Download resumed.'.i18n);
+      return;
+    }
+    if (download.state.isFailed || download.state.isCancelled) {
+      await controller.retry(download);
+      _toast('Retrying download.'.i18n);
+      return;
+    }
+    if (download.state.isQueued) {
+      await controller.moveToFront(download);
+      _toast('Moved to the front of the queue.');
+    }
+  }
+
+  Future<void> _removeEntry(Download download, {bool offerDelete = false}) async {
+    if (offerDelete && download.state.isDone) {
+      final String? choice = await _pickRemoval(download);
+      if (choice == null) return;
+      if (choice == 'delete') {
+        final bool ok = await _confirm(
+          title: 'Delete the file?',
+          message: 'The audio file will be deleted from your device. This cannot be undone.',
+          confirmLabel: 'Delete',
+        );
+        if (!ok) return;
+        await controller.remove(download, deleteFile: true);
+        _toast('Entry and file removed.');
+        return;
+      }
+      await controller.remove(download);
+      _toast('Entry removed. The file was kept.');
+      return;
+    }
+    await controller.remove(download);
+    _toast('Entry removed. The file was kept.');
+  }
+
+  Future<String?> _pickRemoval(Download download) {
+    return showDialog<String>(
+      context: context,
+      builder: (BuildContext context) => SimpleDialog(
+        title: Text(download.title ?? 'Download'.i18n),
+        children: <Widget>[
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(context).pop('keep'),
+            child: Text('Remove from list, keep the file'.i18n),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(context).pop('delete'),
+            child: Text('Remove and delete the file'.i18n, style: const TextStyle(color: Colors.red)),
+          ),
+        ],
       ),
     );
   }
 
-  void _snack(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-      ));
-  }
-
-  List<Download> get _visible {
-    if (_filter == DownloadFilter.all && _query.isEmpty) {
-      return controller.downloads;
+  Future<void> _showActions(Download download) async {
+    ListTile action(IconData icon, String label, VoidCallback onTap, {bool danger = false}) {
+      return ListTile(
+        leading: Icon(icon, color: danger ? Colors.red : null),
+        title: Text(label, style: danger ? const TextStyle(color: Colors.red) : null),
+        onTap: () {
+          Navigator.of(context).pop();
+          onTap();
+        },
+      );
     }
-    return controller.filtered(filter: _filter, query: _query);
+
+    MenuSheet().show(context, <Widget>[
+      ListTile(
+        title: Text(
+          download.title ?? 'Download'.i18n,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18.0),
+        ),
+        subtitle: Text(
+          '${download.state.label} · ${download.qualityLabel}'
+          '${download.filesize > 0 ? ' · ${formatBytes(download.filesize)}' : ''}',
+          maxLines: 2,
+        ),
+      ),
+      const FreezerDivider(),
+      if (download.state.isActive)
+        action(Icons.pause, 'Pause'.i18n, () => controller.pause(download)),
+      if (download.state.isPaused)
+        action(Icons.play_arrow, 'Resume'.i18n, () => controller.resume(download)),
+      if (download.state.isActive || download.state.isQueued)
+        action(Icons.close, 'Cancel'.i18n, () => _cancelWithUndo(download)),
+      if (download.state.isFailed || download.state.isCancelled)
+        action(Icons.refresh, 'Retry'.i18n, () => controller.retry(download)),
+      if (download.state.isQueued || download.state.isPaused)
+        action(Icons.vertical_align_top, 'Move to front'.i18n,
+            () => controller.moveToFront(download)),
+      action(Icons.flag_outlined, 'Priority: ${download.priority.label}', () {
+        _showPriority(download);
+      }),
+      action(Icons.playlist_remove, 'Remove from list'.i18n,
+          () => _removeEntry(download, offerDelete: true)),
+    ]);
   }
 
-  // --- build --------------------------------------------------------------------------------
+  void _showPriority(Download download) {
+    ListTile option(DownloadPriority priority) {
+      return ListTile(
+        leading: Icon(
+          download.priority == priority
+              ? Icons.radio_button_checked
+              : Icons.radio_button_unchecked,
+        ),
+        title: Text(priority.label),
+        onTap: () {
+          Navigator.of(context).pop();
+          controller.setPriority(download, priority);
+        },
+      );
+    }
+
+    MenuSheet().show(context, <Widget>[
+      ListTile(
+        title: Text('Priority'.i18n,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18.0)),
+      ),
+      const FreezerDivider(),
+      for (DownloadPriority priority in DownloadPriority.values) option(priority),
+    ]);
+  }
+
+  // --- build ---------------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
-    final RfTokens tokens = RfTokens.of(context);
-
     return AnimatedBuilder(
       animation: controller,
       builder: (BuildContext context, _) {
         return Scaffold(
-          backgroundColor: tokens.background,
-          appBar: AppBar(
-            backgroundColor: tokens.background,
-            elevation: 0,
-            scrolledUnderElevation: 0,
-            centerTitle: false,
-            titleSpacing: RfTokens.gutter,
-            title: Text('Downloads'.i18n, style: tokens.title),
-            actions: [
-              RfIconAction(
-                icon: _searchOpen ? Icons.search_off : Icons.search,
+          appBar: FreezerAppBar(
+            'Downloads'.i18n,
+            actions: <Widget>[
+              IconButton(
+                icon: Icon(_searchOpen ? Icons.search_off : Icons.search),
                 tooltip: _searchOpen ? 'Close search'.i18n : 'Search'.i18n,
                 onPressed: () {
                   setState(() {
@@ -206,118 +308,180 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                   });
                 },
               ),
-              _buildOverflowMenu(context, tokens),
-              const SizedBox(width: RfTokens.s2),
+              _filterMenu(context),
+              _overflowMenu(context),
+              Container(width: 8.0),
             ],
           ),
-          body: _buildBody(context, tokens),
-          bottomNavigationBar: _selectionMode ? _buildSelectionBar(context, tokens) : null,
+          body: _buildBody(context),
+          bottomNavigationBar: _selectionMode ? _buildSelectionBar(context) : null,
         );
       },
     );
   }
 
-  Widget _buildOverflowMenu(BuildContext context, RfTokens tokens) {
+  Widget _filterMenu(BuildContext context) {
+    final List<DownloadFilter> filters = DownloadFilter.values;
+    return PopupMenuButton<DownloadFilter>(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      icon: const Icon(Icons.filter_list, semanticLabel: 'Filter'),
+      onSelected: (DownloadFilter filter) => setState(() => _filter = filter),
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<DownloadFilter>>[
+        for (DownloadFilter filter in filters)
+          PopupMenuItem<DownloadFilter>(
+            value: filter,
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  filter == _filter ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                  size: 20.0,
+                  color: filter == _filter ? Theme.of(context).primaryColor : null,
+                ),
+                Container(width: 12.0),
+                Expanded(child: Text(filter.label.i18n, style: popupMenuTextStyle())),
+                Text(
+                  '${controller.downloads.where((d) => filter.matches(d)).length}',
+                  style: popupMenuTextStyle().copyWith(color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _overflowMenu(BuildContext context) {
     return PopupMenuButton<String>(
-      tooltip: 'More actions'.i18n,
-      icon: Icon(Icons.more_vert, size: 20, color: tokens.textSecondary),
-      color: tokens.surface,
+      color: Theme.of(context).scaffoldBackgroundColor,
+      icon: const Icon(Icons.more_vert, semanticLabel: 'More actions'),
       onSelected: (String value) async {
         switch (value) {
           case 'retryAll':
             await controller.retryAllFailed();
-            _snack('Retrying failed downloads.');
+            _toast('Retrying failed downloads.');
             break;
           case 'pauseAll':
             await controller.pauseQueue();
+            _toast('Queue paused.'.i18n);
             break;
           case 'resumeAll':
             await controller.startQueue();
+            _toast('Queue resumed.'.i18n);
             break;
           case 'clearDone':
-            await _confirmClearHistory(DownloadState.DONE);
+            await _clearHistory(DownloadState.DONE);
             break;
           case 'clearCancelled':
-            await _confirmClearHistory(DownloadState.CANCELLED);
+            await _clearHistory(DownloadState.CANCELLED);
             break;
         }
       },
-      itemBuilder: (BuildContext context) => [
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
         PopupMenuItem<String>(
           value: 'retryAll',
-          child: Text('Retry all failed'.i18n),
           enabled: controller.summary.failed > 0,
+          child: Text('Retry all failed'.i18n, style: popupMenuTextStyle()),
         ),
         PopupMenuItem<String>(
           value: controller.running ? 'pauseAll' : 'resumeAll',
-          child: Text(controller.running ? 'Pause all'.i18n : 'Resume all'.i18n),
+          child: Text(controller.running ? 'Pause all'.i18n : 'Resume all'.i18n,
+              style: popupMenuTextStyle()),
         ),
         const PopupMenuDivider(),
         PopupMenuItem<String>(
           value: 'clearDone',
-          child: Text('Clear downloaded history'.i18n),
           enabled: controller.summary.completed > 0,
+          child: Text('Clear downloaded history'.i18n, style: popupMenuTextStyle()),
         ),
         PopupMenuItem<String>(
           value: 'clearCancelled',
-          child: Text('Clear cancelled entries'.i18n),
           enabled: controller.summary.cancelled > 0,
+          child: Text('Clear cancelled entries'.i18n, style: popupMenuTextStyle()),
         ),
       ],
     );
   }
 
-  Widget _buildBody(BuildContext context, RfTokens tokens) {
+  Widget _buildBody(BuildContext context) {
     if (controller.loading && !controller.loaded) {
-      return ListView(
-        padding: const EdgeInsets.only(top: RfTokens.s4),
-        children: const [
-          RfSkeletonRow(),
-          RfSkeletonRow(),
-          RfSkeletonRow(),
-          RfSkeletonRow(),
-        ],
-      );
+      return const Center(child: CircularProgressIndicator());
     }
 
     if (controller.loadError != null && controller.downloads.isEmpty) {
-      return RfErrorState(
-        message: controller.loadError!,
-        onRetry: controller.refresh,
-      );
+      return _errorState(context);
     }
 
-    final List<Download> visible = _visible;
-
-    return Column(
-      children: [
-        _buildHeader(context, tokens),
-        if (_searchOpen)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: RfTokens.gutter),
-            child: RfSearchField(
-              controller: _search,
-              hint: 'Search downloads',
-              onChanged: (String value) => setState(() => _query = value),
-            ),
-          ),
-        RfFilterBar<DownloadFilter>(
-          items: DownloadFilter.values,
-          selected: _filter,
-          labelBuilder: (DownloadFilter filter) => filter.label.i18n,
-          countBuilder: (DownloadFilter filter) =>
-              controller.downloads.where((d) => filter.matches(d)).length,
-          onSelected: (DownloadFilter filter) => setState(() => _filter = filter),
-        ),
-        const RfHairline(),
-        Expanded(child: _buildList(context, tokens, visible)),
-      ],
+    return DraggableScrollbar.rrect(
+      controller: _scrollController,
+      backgroundColor: Theme.of(context).primaryColor,
+      child: ListView(
+        controller: _scrollController,
+        children: <Widget>[
+          _header(context),
+          if (_searchOpen) _searchField(context),
+          const FreezerDivider(),
+          ..._listContent(context),
+          const SizedBox(height: 24.0),
+        ],
+      ),
     );
   }
 
-  Widget _buildHeader(BuildContext context, RfTokens tokens) {
+  Widget _errorState(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(Icons.error_outline, size: 64.0, color: Theme.of(context).primaryColor),
+            const SizedBox(height: 12.0),
+            Text(
+              'Could not load the download queue'.i18n,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 18.0, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8.0),
+            Text(controller.loadError ?? '', textAlign: TextAlign.center),
+            const SizedBox(height: 12.0),
+            TextButton(
+              child: Text('Retry'.i18n),
+              onPressed: controller.refresh,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _searchField(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 8.0),
+      child: TextField(
+        controller: _search,
+        autofocus: true,
+        decoration: InputDecoration(
+          hintText: 'Search downloads'.i18n,
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: 'Clear'.i18n,
+            onPressed: () {
+              _search.clear();
+              setState(() => _query = '');
+            },
+          ),
+          border: const OutlineInputBorder(),
+        ),
+        onChanged: (String value) => setState(() => _query = value),
+      ),
+    );
+  }
+
+  Widget _header(BuildContext context) {
     final DownloadSummary summary = controller.summary;
     final bool hasAny = controller.downloads.isNotEmpty;
+    final Color accent = Theme.of(context).primaryColor;
 
     String headline;
     String detail;
@@ -345,7 +509,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       headline = 'Up to date';
       detail = '${summary.completed} downloaded · ${formatBytes(summary.downloadedBytes)} offline';
     } else {
-      headline = 'Downloads';
+      headline = 'Nothing queued';
       detail = 'Downloaded music is available offline and never disappears by itself';
     }
 
@@ -354,148 +518,156 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         ? '${formatBytes(controller.freeBytes)} free'
             '${estimated > 0 ? ' · ~${formatBytes(estimated)} needed' : ''}'
         : '';
-
     final bool lowStorage =
         controller.freeBytes > 0 && estimated > 0 && estimated > controller.freeBytes;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          RfTokens.gutter, RfTokens.s2, RfTokens.gutter, RfTokens.s3),
+      padding: const EdgeInsets.fromLTRB(16.0, 8.0, 8.0, 12.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+        children: <Widget>[
           if (summary.active > 0 || summary.queued > 0 || summary.paused > 0)
             Padding(
-              padding: const EdgeInsets.only(bottom: RfTokens.s3),
-              child: RfProgress(
-                value: summary.overallProgress,
-                indeterminate: summary.active > 0 && summary.totalBytes <= 0,
+              padding: const EdgeInsets.only(right: 8.0, bottom: 12.0),
+              child: LinearProgressIndicator(
+                value: summary.totalBytes > 0 ? summary.overallProgress : null,
+                minHeight: 3.0,
+                backgroundColor: Theme.of(context).dividerColor,
+                color: accent,
               ),
             ),
           Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
+            children: <Widget>[
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(headline, style: tokens.display, maxLines: 2),
-                    const SizedBox(height: RfTokens.s1),
-                    Text(detail, style: tokens.caption),
-                    if (storageLine.isNotEmpty) ...[
-                      const SizedBox(height: RfTokens.s1),
+                  children: <Widget>[
+                    Text(
+                      headline.i18n,
+                      style: const TextStyle(fontSize: 20.0, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 2.0),
+                    Text(detail.i18n, style: const TextStyle(fontSize: 13.0)),
+                    if (storageLine.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 2.0),
                       Text(
                         storageLine,
-                        style: tokens.caption.copyWith(
-                          color: lowStorage ? tokens.warning : tokens.textTertiary,
+                        style: TextStyle(
+                          fontSize: 13.0,
+                          color: lowStorage ? Colors.orange : Colors.grey,
                         ),
                       ),
                     ],
                   ],
                 ),
               ),
-              const SizedBox(width: RfTokens.s3),
               if (hasAny)
                 controller.running
-                    ? RfIconAction(
-                        icon: Icons.pause,
+                    ? IconButton(
+                        icon: const Icon(Icons.pause, size: 28.0),
                         tooltip: 'Pause all'.i18n,
-                        onPressed: controller.pauseQueue,
+                        onPressed: () async {
+                          await controller.pauseQueue();
+                          _toast('Queue paused.'.i18n);
+                        },
                       )
                     : _hasResumable
-                        ? RfIconAction(
-                            icon: Icons.play_arrow,
+                        ? IconButton(
+                            icon: const Icon(Icons.play_arrow, size: 28.0),
                             tooltip: 'Resume all'.i18n,
-                            onPressed: controller.startQueue,
+                            onPressed: () async {
+                              await controller.startQueue();
+                              _toast('Queue resumed.'.i18n);
+                            },
                           )
-                        : const SizedBox.shrink(),
+                        : const SizedBox(width: 0, height: 0),
             ],
           ),
-          if (controller.needsAuth) ...[
-            const SizedBox(height: RfTokens.s3),
-            _buildNotice(
-              tokens,
+          if (controller.needsAuth)
+            _notice(
+              context,
               icon: Icons.lock_outline,
-              text:
-                  'Sign in to Deezer again to continue downloading. The queue is kept.',
-            ),
-          ] else if (lowStorage) ...[
-            const SizedBox(height: RfTokens.s3),
-            _buildNotice(
-              tokens,
+              text: 'Sign in to Deezer again to continue downloading. The queue is kept.',
+            )
+          else if (lowStorage)
+            _notice(
+              context,
               icon: Icons.sd_card_alert_outlined,
-              text:
-                  'Low storage: the queue needs about ${formatBytes(estimated)}, '
+              text: 'Low storage: the queue needs about ${formatBytes(estimated)}, '
                   '${formatBytes(controller.freeBytes)} are free.',
             ),
-          ],
         ],
       ),
     );
   }
 
-  bool get _hasResumable => controller.downloads.any(
-      (d) => d.state.isPaused || d.state.isQueued || d.state.isFailed);
-
-  Widget _buildNotice(RfTokens tokens, {required IconData icon, required String text}) {
-    return Container(
-      padding: const EdgeInsets.all(RfTokens.s3),
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        border: Border(left: BorderSide(color: tokens.warning, width: 2)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 16, color: tokens.warning),
-          const SizedBox(width: RfTokens.s2),
-          Expanded(child: Text(text, style: tokens.caption)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildList(BuildContext context, RfTokens tokens, List<Download> visible) {
-    if (controller.downloads.isEmpty) {
-      return RfEmptyState(
-        icon: Icons.download_outlined,
-        title: 'Nothing downloaded yet'.i18n,
-        message:
-            'Use the download button on a track, album or playlist. '
-                'Progress, failures and history show up here.',
-      );
-    }
-
-    if (visible.isEmpty) {
-      return RfEmptyState(
-        icon: Icons.filter_alt_off_outlined,
-        title: 'No downloads match'.i18n,
-        message: _query.isNotEmpty
-            ? 'Nothing matches "$_query". Try a different search or filter.'
-            : 'Nothing in this section right now.',
-        action: RfSecondaryButton(
-          label: 'Clear filters'.i18n,
-          onPressed: () => setState(() {
-            _filter = DownloadFilter.all;
-            _query = '';
-            _search.clear();
-          }),
+  Widget _notice(BuildContext context, {required IconData icon, required String text}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12.0, right: 8.0),
+      child: Container(
+        padding: const EdgeInsets.all(8.0),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.orange),
+          borderRadius: BorderRadius.circular(4.0),
         ),
-      );
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Icon(icon, size: 18.0, color: Colors.orange),
+            Container(width: 8.0),
+            Expanded(child: Text(text.i18n, style: const TextStyle(fontSize: 13.0))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _listContent(BuildContext context) {
+    if (controller.downloads.isEmpty) {
+      return <Widget>[
+        _emptyState(
+          context,
+          icon: Icons.download_outlined,
+          title: 'Nothing downloaded yet'.i18n,
+          message: 'Use the download button on a track, album, playlist or artist. '
+              'Progress, failures and history show up here.',
+        ),
+      ];
     }
 
-    // Group headers only make sense in the "all" view.
+    final List<Download> visible = _visible;
+    if (visible.isEmpty) {
+      return <Widget>[
+        _emptyState(
+          context,
+          icon: Icons.filter_alt_off_outlined,
+          title: 'No downloads match'.i18n,
+          message: _query.isNotEmpty
+              ? 'Nothing matches "$_query". Try a different search or filter.'
+              : 'Nothing in this section right now.',
+          action: TextButton(
+            child: Text('Clear filters'.i18n),
+            onPressed: () => setState(() {
+              _filter = DownloadFilter.all;
+              _query = '';
+              _search.clear();
+            }),
+          ),
+        ),
+      ];
+    }
+
+    final List<Widget> children = <Widget>[];
     final bool grouped = _filter == DownloadFilter.all && _query.isEmpty;
-    final List<Widget> children = [];
 
     if (grouped) {
       final Map<String, List<Download>> sections = controller.grouped();
       void addSection(String key, String label) {
-        final List<Download> items = sections[key] ?? const [];
+        final List<Download> items = sections[key] ?? const <Download>[];
         if (items.isEmpty) return;
-        children.add(RfSectionHeader(label));
+        children.add(_sectionHeader(label));
         for (Download download in items) {
-          children.add(_row(context, tokens, download));
+          children.addAll(_row(context, download));
         }
       }
 
@@ -505,278 +677,142 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       addSection('finished', 'Finished');
     } else {
       for (Download download in visible) {
-        children.add(_row(context, tokens, download));
+        children.addAll(_row(context, download));
       }
     }
 
-    children.add(const SizedBox(height: RfTokens.s7));
-
-    return ListView(
-      padding: EdgeInsets.zero,
-      children: children,
-    );
+    return children;
   }
 
-  Widget _row(BuildContext context, RfTokens tokens, Download download) {
-    final bool selected = download.id != null && _selected.contains(download.id);
-    final Widget content = _DownloadRow(
-      download: download,
-      selected: selected,
-      selectionMode: _selectionMode,
-      tokens: tokens,
-      onTap: () {
-        if (_selectionMode) {
-          _toggleSelection(download);
-        } else {
-          _showActions(download);
-        }
-      },
-      onLongPress: () => _toggleSelection(download),
-      onPrimaryAction: () => _primaryAction(download),
-      onMenu: () => _showActions(download),
-    );
-
-    return Dismissible(
-      key: ValueKey<String>('download-${download.id}'),
-      direction: _selectionMode
-          ? DismissDirection.none
-          : (download.state.isActive || download.state.isQueued || download.state.isPaused
-              ? DismissDirection.horizontal
-              : DismissDirection.endToStart),
-      background: _swipeBackground(tokens, pause: true),
-      secondaryBackground: _swipeBackground(tokens, pause: false),
-      confirmDismiss: (DismissDirection direction) async {
-        if (direction == DismissDirection.startToEnd) {
-          // Pause / resume without confirmation: reversible.
-          if (download.state.isActive || download.state.isQueued) {
-            await controller.pause(download);
-          } else if (download.state.isPaused) {
-            await controller.resume(download);
-          }
-          return false;
-        }
-        if (download.state.isActive || download.state.isQueued || download.state.isPaused) {
-          await _cancelWithUndo(download);
-          return false;
-        }
-        final bool ok = await rfConfirm(
-          context,
-          title: 'Remove from the list?',
-          message: 'The audio file stays on your device. '
-              'Only the entry in this list is removed.',
-          confirmLabel: 'Remove',
-        );
-        if (!ok) return false;
-        await controller.remove(download);
-        return true;
-      },
-      child: content,
-    );
-  }
-
-  Widget _swipeBackground(RfTokens tokens, {required bool pause}) {
-    return Container(
-      color: tokens.surfaceHigh,
-      alignment: pause ? Alignment.centerLeft : Alignment.centerRight,
-      padding: const EdgeInsets.symmetric(horizontal: RfTokens.gutter),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (pause) ...[
-            Icon(Icons.pause_circle_outline, size: 18, color: tokens.textSecondary),
-            const SizedBox(width: RfTokens.s2),
-            Text('Pause'.i18n, style: tokens.caption),
-          ] else ...[
-            Text('Cancel'.i18n, style: tokens.caption),
-            const SizedBox(width: RfTokens.s2),
-            Icon(Icons.close, size: 18, color: tokens.danger),
-          ],
-        ],
+  Widget _sectionHeader(String label) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16.0, 16.0, 16.0, 4.0),
+      child: Text(
+        label.i18n.toUpperCase(),
+        style: const TextStyle(fontSize: 12.0, fontWeight: FontWeight.w300),
       ),
     );
   }
 
-  Future<void> _primaryAction(Download download) async {
-    if (download.state.isActive) {
-      await controller.pause(download);
-      return;
-    }
-    if (download.state.isPaused) {
-      await controller.resume(download);
-      return;
-    }
-    if (download.state.isFailed || download.state.isCancelled) {
-      await controller.retry(download);
-      return;
-    }
-    if (download.state.isQueued) {
-      await controller.moveToFront(download);
-      _snack('Moved to the front of the queue.');
-    }
-  }
-
-  Future<void> _showActions(Download download) async {
-    final RfTokens tokens = RfTokens.of(context);
-    await rfSheet<void>(
-      context,
-      Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                RfTokens.gutter, RfTokens.s2, RfTokens.gutter, RfTokens.s1),
-            child: Text(download.title ?? 'Download', style: tokens.title),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                RfTokens.gutter, 0, RfTokens.gutter, RfTokens.s3),
-            child: Text(
-              '${download.state.label} · ${download.qualityLabel}'
-              '${download.filesize > 0 ? ' · ${formatBytes(download.filesize)}' : ''}',
-              style: tokens.caption,
-            ),
-          ),
-          const RfHairline(),
-          if (download.state.isActive)
-            _sheetAction(context,
-                icon: Icons.pause,
-                label: 'Pause'.i18n,
-                onTap: () {
-              Navigator.of(context).pop();
-              controller.pause(download);
-            }),
-          if (download.state.isActive || download.state.isQueued)
-            _sheetAction(context,
-                icon: Icons.close,
-                label: 'Cancel'.i18n,
-                onTap: () {
-              Navigator.of(context).pop();
-              _cancelWithUndo(download);
-            }),
-          if (download.state.isPaused)
-            _sheetAction(context,
-                icon: Icons.play_arrow,
-                label: 'Resume'.i18n,
-                onTap: () {
-              Navigator.of(context).pop();
-              controller.resume(download);
-            }),
-          if (download.state.isFailed || download.state.isCancelled)
-            _sheetAction(context,
-                icon: Icons.refresh,
-                label: 'Retry'.i18n,
-                onTap: () {
-              Navigator.of(context).pop();
-              controller.retry(download);
-            }),
-          if (download.state.isQueued || download.state.isPaused)
-            _sheetAction(context,
-                icon: Icons.vertical_align_top,
-                label: 'Move to front'.i18n,
-                onTap: () {
-              Navigator.of(context).pop();
-              controller.moveToFront(download);
-            }),
-          _sheetAction(
-            context,
-            icon: Icons.flag_outlined,
-            label: 'Priority: ${download.priority.label}',
-            onTap: () {
-              Navigator.of(context).pop();
-              _showPrioritySheet(download);
-            },
-          ),
-          const RfHairline(),
-          _sheetAction(
-            context,
-            icon: Icons.playlist_remove,
-            label: 'Remove from list'.i18n,
-            onTap: () {
-              Navigator.of(context).pop();
-              _removeEntry(download, offerDelete: true);
-            },
-          ),
-          if (download.metadataWarning != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  RfTokens.gutter, RfTokens.s2, RfTokens.gutter, RfTokens.s3),
-              child: Text(
-                'Audio saved, but ${download.metadataWarning} could not be added. '
-                'You can retry the metadata by removing and downloading again.',
-                style: tokens.caption.copyWith(color: tokens.warning),
-              ),
-            ),
-          const SizedBox(height: RfTokens.s3),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showPrioritySheet(Download download) async {
-    final RfTokens tokens = RfTokens.of(context);
-    await rfSheet<void>(
-      context,
-      Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                RfTokens.gutter, RfTokens.s3, RfTokens.gutter, RfTokens.s2),
-            child: Text('Priority'.i18n, style: tokens.title),
-          ),
-          for (DownloadPriority priority in DownloadPriority.values)
-            _sheetAction(
-              context,
-              icon: download.priority == priority
-                  ? Icons.radio_button_checked
-                  : Icons.radio_button_unchecked,
-              label: priority.label,
-              onTap: () {
-                Navigator.of(context).pop();
-                controller.setPriority(download, priority);
-              },
-            ),
-          const SizedBox(height: RfTokens.s3),
-        ],
-      ),
-    );
-  }
-
-  Widget _sheetAction(
+  Widget _emptyState(
     BuildContext context, {
     required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    bool danger = false,
+    required String title,
+    required String message,
+    Widget? action,
   }) {
-    final RfTokens tokens = RfTokens.of(context);
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-            horizontal: RfTokens.gutter, vertical: RfTokens.s3),
-        child: Row(
-          children: [
-            Icon(icon, size: 20, color: danger ? tokens.danger : tokens.textSecondary),
-            const SizedBox(width: RfTokens.s3),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontSize: 15,
-                  color: danger ? tokens.danger : tokens.textPrimary,
-                ),
-              ),
-            ),
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          Icon(icon, size: 64.0, color: Theme.of(context).primaryColor),
+          const SizedBox(height: 12.0),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 18.0, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8.0),
+          Text(message, textAlign: TextAlign.center),
+          if (action != null) ...<Widget>[
+            const SizedBox(height: 12.0),
+            action,
           ],
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildSelectionBar(BuildContext context, RfTokens tokens) {
+  List<Widget> _row(BuildContext context, Download download) {
+    final bool selected = download.id != null && _selected.contains(download.id);
+
+    final Widget tile = Container(
+      color: selected ? Theme.of(context).primaryColor.withOpacity(0.12) : null,
+      child: _DownloadRow(
+        download: download,
+        selectionMode: _selectionMode,
+        selected: selected,
+        onTap: () {
+          if (_selectionMode) {
+            _toggleSelection(download);
+          } else {
+            _showActions(download);
+          }
+        },
+        onLongPress: () => _toggleSelection(download),
+        onPrimaryAction: () => _primaryAction(download),
+        onMenu: () => _showActions(download),
+      ),
+    );
+
+    if (_selectionMode) {
+      return <Widget>[tile, const FreezerDivider()];
+    }
+
+    final bool activeOrWaiting =
+        download.state.isActive || download.state.isQueued || download.state.isPaused;
+
+    return <Widget>[
+      Dismissible(
+        key: ValueKey<String>('download-${download.id}'),
+        direction:
+            activeOrWaiting ? DismissDirection.horizontal : DismissDirection.endToStart,
+        background: _swipeBackground(context, pause: true),
+        secondaryBackground: _swipeBackground(context, pause: false),
+        confirmDismiss: (DismissDirection direction) async {
+          if (direction == DismissDirection.startToEnd) {
+            // Pause / resume without confirmation: reversible.
+            if (download.state.isActive || download.state.isQueued) {
+              await controller.pause(download);
+            } else if (download.state.isPaused) {
+              await controller.resume(download);
+            }
+            return false;
+          }
+          if (activeOrWaiting) {
+            await _cancelWithUndo(download);
+            return false;
+          }
+          final bool ok = await _confirm(
+            title: 'Remove from the list?',
+            message: 'The audio file stays on your device. '
+                'Only the entry in this list is removed.',
+            confirmLabel: 'Remove',
+          );
+          if (!ok) return false;
+          await controller.remove(download);
+          return true;
+        },
+        child: tile,
+      ),
+      const FreezerDivider(),
+    ];
+  }
+
+  Widget _swipeBackground(BuildContext context, {required bool pause}) {
+    return Container(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      alignment: pause ? Alignment.centerLeft : Alignment.centerRight,
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (pause) ...<Widget>[
+            const Icon(Icons.pause_circle_outline, size: 20.0),
+            Container(width: 8.0),
+            Text('Pause'.i18n),
+          ] else ...<Widget>[
+            Text('Cancel'.i18n),
+            Container(width: 8.0),
+            const Icon(Icons.close, size: 20.0, color: Colors.red),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSelectionBar(BuildContext context) {
     final List<Download> selected = controller.downloads
         .where((d) => d.id != null && _selected.contains(d.id))
         .toList();
@@ -784,126 +820,110 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     final bool anyPaused = selected.any((d) => d.state.isPaused);
     final bool anyActive = selected.any((d) => d.state.isActive || d.state.isQueued);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        border: Border(top: BorderSide(color: tokens.hairline)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                  RfTokens.gutter, RfTokens.s2, RfTokens.s2, 0),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '${selected.length} selected',
-                      style: tokens.caption.copyWith(color: tokens.textPrimary),
-                    ),
-                  ),
-                  RfIconAction(
-                    icon: Icons.close,
-                    tooltip: 'Clear selection'.i18n,
-                    onPressed: _clearSelection,
-                  ),
-                ],
+    Widget button(IconData icon, String label, VoidCallback onTap) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 4.0),
+        child: TextButton.icon(
+          onPressed: onTap,
+          icon: Icon(icon, size: 18.0),
+          label: Text(label),
+        ),
+      );
+    }
+
+    return BottomAppBar(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      elevation: 0.0,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Container(width: 16.0),
+              Expanded(
+                child: Text(
+                  '${selected.length} selected',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
-            ),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.fromLTRB(
-                  RfTokens.gutter, 0, RfTokens.gutter, RfTokens.s2),
-              child: Row(
-                children: [
-                  if (anyActive)
-                    _batchAction(tokens, Icons.pause, 'Pause', () async {
-                      for (Download d in selected) {
-                        if (d.state.isActive || d.state.isQueued) await controller.pause(d);
-                      }
-                      _clearSelection();
-                    }),
-                  if (anyPaused)
-                    _batchAction(tokens, Icons.play_arrow, 'Resume', () async {
-                      for (Download d in selected) {
-                        if (d.state.isPaused) await controller.resume(d);
-                      }
-                      _clearSelection();
-                    }),
-                  if (anyFailed)
-                    _batchAction(tokens, Icons.refresh, 'Retry', () async {
-                      for (Download d in selected) {
-                        if (d.state.isFailed || d.state.isCancelled) {
-                          await controller.retry(d);
-                        }
-                      }
-                      _clearSelection();
-                    }),
-                  _batchAction(tokens, Icons.low_priority, 'Low priority', () async {
+              IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: 'Clear selection'.i18n,
+                onPressed: _clearSelection,
+              ),
+            ],
+          ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 12.0),
+            child: Row(
+              children: <Widget>[
+                if (anyActive)
+                  button(Icons.pause, 'Pause'.i18n, () async {
                     for (Download d in selected) {
-                      await controller.setPriority(d, DownloadPriority.low);
+                      if (d.state.isActive || d.state.isQueued) await controller.pause(d);
                     }
                     _clearSelection();
                   }),
-                  _batchAction(tokens, Icons.playlist_remove, 'Remove', () async {
-                    final bool ok = await rfConfirm(
-                      context,
-                      title: 'Remove ${selected.length} entries?',
-                      message: 'Downloaded files stay on your device; only the list entries '
-                          'are removed.',
-                      confirmLabel: 'Remove',
-                    );
-                    if (!ok) return;
+                if (anyPaused)
+                  button(Icons.play_arrow, 'Resume'.i18n, () async {
                     for (Download d in selected) {
-                      await controller.remove(d);
+                      if (d.state.isPaused) await controller.resume(d);
                     }
                     _clearSelection();
                   }),
-                  _batchAction(tokens, Icons.close, 'Cancel', () async {
+                if (anyFailed)
+                  button(Icons.refresh, 'Retry'.i18n, () async {
+                    for (Download d in selected) {
+                      if (d.state.isFailed || d.state.isCancelled) {
+                        await controller.retry(d);
+                      }
+                    }
+                    _clearSelection();
+                  }),
+                button(Icons.low_priority, 'Low priority'.i18n, () async {
+                  for (Download d in selected) {
+                    await controller.setPriority(d, DownloadPriority.low);
+                  }
+                  _clearSelection();
+                }),
+                button(Icons.playlist_remove, 'Remove'.i18n, () async {
+                  final bool ok = await _confirm(
+                    title: 'Remove ${selected.length} entries?',
+                    message: 'Downloaded files stay on your device; only the list entries '
+                        'are removed.',
+                    confirmLabel: 'Remove',
+                  );
+                  if (!ok) return;
+                  for (Download d in selected) {
+                    await controller.remove(d);
+                  }
+                  _clearSelection();
+                }),
+                if (anyActive)
+                  button(Icons.close, 'Cancel'.i18n, () async {
                     for (Download d in selected) {
                       if (d.state.isActive || d.state.isQueued) await controller.cancel(d);
                     }
                     _clearSelection();
                   }),
-                ],
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _batchAction(
-      RfTokens tokens, IconData icon, String label, VoidCallback onTap) {
-    return Padding(
-      padding: const EdgeInsets.only(right: RfTokens.s2),
-      child: TextButton.icon(
-        onPressed: onTap,
-        icon: Icon(icon, size: 17, color: tokens.textSecondary),
-        label: Text(label,
-            style: TextStyle(fontSize: 13, color: tokens.textPrimary)),
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: RfTokens.s3),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(RfTokens.rSm),
-            side: BorderSide(color: tokens.hairline),
           ),
-        ),
+        ],
       ),
     );
   }
 }
 
 /// One queue row: artwork, title, state line, progress and actions.
+///
+/// Uses the same geometry as [TrackTile] (48px artwork, ListTile padding) so the list looks like
+/// the rest of the app.
 class _DownloadRow extends StatelessWidget {
   final Download download;
   final bool selected;
   final bool selectionMode;
-  final RfTokens tokens;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onPrimaryAction;
@@ -913,28 +933,11 @@ class _DownloadRow extends StatelessWidget {
     required this.download,
     required this.selected,
     required this.selectionMode,
-    required this.tokens,
     required this.onTap,
     required this.onLongPress,
     required this.onPrimaryAction,
     required this.onMenu,
   });
-
-  Color get _statusColor {
-    switch (download.state) {
-      case DownloadState.DONE:
-        return tokens.success;
-      case DownloadState.ERROR:
-      case DownloadState.DEEZER_ERROR:
-        return tokens.danger;
-      case DownloadState.PAUSED:
-        return tokens.warning;
-      case DownloadState.CANCELLED:
-        return tokens.textTertiary;
-      default:
-        return tokens.accent;
-    }
-  }
 
   String get _secondary {
     switch (download.state) {
@@ -944,7 +947,7 @@ class _DownloadRow extends StatelessWidget {
         final String progress = download.filesize > 0
             ? '${formatBytes(download.received)} / ${formatBytes(download.filesize)}'
             : formatBytes(download.received);
-        return [
+        return <String>[
           progress,
           if (speed.isNotEmpty) speed,
           if (eta != null) '${formatDuration(eta)} left',
@@ -971,102 +974,22 @@ class _DownloadRow extends StatelessWidget {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final bool showProgress = download.state.isActive ||
-        (download.state.isPaused && download.progress > 0) ||
-        (download.state.isQueued && download.awaitingRetry);
+  IconData get _trailingIcon {
+    if (download.state.isActive) return Icons.pause;
+    if (download.state.isDone) return Icons.download_done;
+    if (download.state.isPaused) return Icons.pause_circle_outline;
+    if (download.state.isFailed) return Icons.error_outline;
+    if (download.state.isCancelled) return Icons.cancel_outlined;
+    if (download.state == DownloadState.POST) return Icons.autorenew;
+    return Icons.schedule;
+  }
 
-    return Material(
-      color: selected ? tokens.accentSoft : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-              RfTokens.gutter, RfTokens.s3, RfTokens.s2, RfTokens.s3),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              if (selectionMode)
-                Padding(
-                  padding: const EdgeInsets.only(right: RfTokens.s2),
-                  child: Icon(
-                    selected ? Icons.check_circle : Icons.radio_button_unchecked,
-                    size: 20,
-                    color: selected ? tokens.accent : tokens.textTertiary,
-                  ),
-                ),
-              RfArtwork(url: download.image, size: RfTokens.artworkSm),
-              const SizedBox(width: RfTokens.s3),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            download.title ?? 'Unknown track',
-                            style: tokens.rowTitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: RfTokens.s2),
-                        if (download.state.isDone)
-                          RfStatus('Saved', color: tokens.success)
-                        else if (download.state.isFailed)
-                          RfStatus('Failed', color: tokens.danger)
-                        else if (download.state.isPaused)
-                          RfStatus('Paused', color: tokens.warning)
-                        else if (download.state.isQueued)
-                          RfStatus('Queued', color: tokens.textTertiary)
-                        else if (download.state.isActive)
-                          RfStatus(
-                            download.state == DownloadState.POST ? 'Processing' : 'Downloading',
-                            color: tokens.accent,
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      _secondary,
-                      style: tokens.caption.copyWith(
-                        color: download.state.isFailed ? tokens.danger : tokens.textSecondary,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (showProgress) ...[
-                      const SizedBox(height: RfTokens.s2),
-                      RfProgress(
-                        value: download.progress,
-                        indeterminate: download.state == DownloadState.POST,
-                        color: _statusColor,
-                        height: 2,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (!selectionMode) ...[
-                RfIconAction(
-                  icon: _primaryIcon,
-                  tooltip: _primaryTooltip,
-                  onPressed: onPrimaryAction,
-                ),
-                RfIconAction(
-                  icon: Icons.more_vert,
-                  tooltip: 'More'.i18n,
-                  onPressed: onMenu,
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
+  Color? _trailingColor(BuildContext context) {
+    if (download.state.isFailed) return Colors.red;
+    if (download.state.isPaused) return Colors.orange;
+    if (download.state.isDone) return Colors.green;
+    if (download.state.isActive) return Theme.of(context).primaryColor;
+    return null;
   }
 
   IconData get _primaryIcon {
@@ -1083,5 +1006,82 @@ class _DownloadRow extends StatelessWidget {
     if (download.state.isFailed || download.state.isCancelled) return 'Retry'.i18n;
     if (download.state.isQueued) return 'Move to front'.i18n;
     return 'Actions'.i18n;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool showProgress = download.state.isActive ||
+        (download.state.isPaused && download.progress > 0) ||
+        (download.state.isQueued && download.awaitingRetry);
+
+    return ListTile(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      leading: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (selectionMode)
+            Padding(
+              padding: const EdgeInsets.only(right: 4.0),
+              child: Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                size: 22.0,
+                color: selected ? Theme.of(context).primaryColor : Colors.grey,
+              ),
+            ),
+          CachedImage(url: download.image ?? '', width: 48.0),
+        ],
+      ),
+      title: Text(
+        download.title ?? 'Unknown track',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: download.state.isActive ? Theme.of(context).primaryColor : null,
+        ),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            _secondary,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: download.state.isFailed ? Colors.red : null,
+            ),
+          ),
+          if (showProgress)
+            Padding(
+              padding: const EdgeInsets.only(top: 6.0, right: 8.0),
+              child: LinearProgressIndicator(
+                value: download.state == DownloadState.POST ? null : download.progress,
+                minHeight: 2.0,
+                backgroundColor: Theme.of(context).dividerColor,
+                color: Theme.of(context).primaryColor,
+              ),
+            ),
+        ],
+      ),
+      trailing: selectionMode
+          ? null
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Icon(_trailingIcon, size: 20.0, color: _trailingColor(context)),
+                Container(width: 4.0),
+                IconButton(
+                  icon: Icon(_primaryIcon, size: 22.0),
+                  tooltip: _primaryTooltip,
+                  onPressed: onPrimaryAction,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.more_vert, size: 22.0),
+                  tooltip: 'More'.i18n,
+                  onPressed: onMenu,
+                ),
+              ],
+            ),
+    );
   }
 }

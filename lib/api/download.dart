@@ -383,6 +383,136 @@ class DownloadManager {
     await start();
   }
 
+  //===================
+  // BATCH DOWNLOADS (whole album / playlist / artist)
+  //===================
+
+  /// Downloads every track the app can see for [artist]: the top tracks and all tracks of every
+  /// album in the discography.
+  ///
+  /// Albums are fetched page by page; a single album failing (taken down, network) does not abort
+  /// the batch, it is counted in [BatchDownloadResult.failedAlbums]. Returns `null` when the
+  /// download cannot start at all (no storage permission, or the user cancelled the quality
+  /// prompt).
+  Future<BatchDownloadResult?> downloadArtist(
+    Artist artist, {
+    AudioQuality? quality,
+    bool includeAlbums = true,
+    bool includeTopTracks = true,
+    int maxAlbums = 200,
+    void Function(int done, int total)? onProgress,
+  }) async {
+    if (artist.id == null || artist.id!.isEmpty) return null;
+    if (!await checkPermission()) return null;
+
+    AudioQuality? selected = quality;
+    if (settings.downloadQuality == AudioQuality.ASK && selected == null) {
+      selected = await qualitySelect();
+      if (selected == null) return null;
+    }
+
+    // The list screens may only carry a stub, so refresh the artist payload first.
+    try {
+      artist = await deezerAPI.artist(artist.id!);
+    } catch (e) {
+      Logger.root.warning('Could not refresh artist ${artist.id}', e);
+    }
+
+    final List<Track> tracks = <Track>[];
+    if (includeTopTracks) tracks.addAll(artist.topTracks);
+
+    int albumCount = 0;
+    int failedAlbums = 0;
+    if (includeAlbums) {
+      final List<Album> albums = await _artistAlbums(artist, maxAlbums: maxAlbums);
+      albumCount = albums.length;
+      int done = 0;
+      for (Album album in albums) {
+        done++;
+        onProgress?.call(done, albums.length);
+        try {
+          Album full = (album.tracks == null || album.tracks!.isEmpty)
+              ? await deezerAPI.album(album.id ?? '')
+              : album;
+          tracks.addAll(full.tracks ?? const <Track>[]);
+        } catch (e) {
+          failedAlbums++;
+          Logger.root.warning('Could not load album ${album.id} of ${artist.id}', e);
+        }
+      }
+    }
+
+    // One entry per track, in discovery order (top tracks first, then album by album).
+    final Map<String, Track> unique = <String, Track>{};
+    for (Track track in tracks) {
+      if (track.id == null || track.id!.isEmpty) continue;
+      unique.putIfAbsent(track.id!, () => track);
+    }
+
+    final List<Map> payload = <Map>[];
+    for (Track track in unique.values) {
+      try {
+        payload.add(await downloadJsonFromTrack(
+          track,
+          _generatePath(track, false),
+          private: false,
+          quality: selected,
+        ));
+      } catch (e) {
+        // A track without usable playback details is skipped, not fatal for the batch.
+        Logger.root.warning('Could not prepare track ${track.id}', e);
+      }
+    }
+
+    if (payload.isEmpty) {
+      return BatchDownloadResult(
+        queue: const DownloadEnqueueResult(),
+        tracks: 0,
+        albums: albumCount,
+        failedAlbums: failedAlbums,
+      );
+    }
+
+    final DownloadEnqueueResult result = await enqueue(payload);
+    return BatchDownloadResult(
+      queue: result,
+      tracks: payload.length,
+      albums: albumCount,
+      failedAlbums: failedAlbums,
+    );
+  }
+
+  /// All albums of [artist], merging the ones already present on the payload with the paginated
+  /// discography. Stops when the API repeats itself or [maxAlbums] is reached.
+  Future<List<Album>> _artistAlbums(Artist artist, {int maxAlbums = 200}) async {
+    final Map<String, Album> found = <String, Album>{};
+    for (Album album in artist.albums) {
+      if (album.id != null && album.id!.isNotEmpty) found.putIfAbsent(album.id!, () => album);
+    }
+
+    const int pageSize = 50;
+    int start = 0;
+    while (found.length < maxAlbums) {
+      List<Album> page;
+      try {
+        page = await deezerAPI.discographyPage(artist.id ?? '', start: start, nb: pageSize);
+      } catch (e) {
+        Logger.root.warning('Discography page $start failed for ${artist.id}', e);
+        break;
+      }
+      if (page.isEmpty) break;
+      final int before = found.length;
+      for (Album album in page) {
+        if (album.id != null && album.id!.isNotEmpty) found.putIfAbsent(album.id!, () => album);
+      }
+      start += page.length;
+      // No new albums and a short page both mean there is nothing left to fetch.
+      if (found.length == before || page.length < pageSize) break;
+    }
+
+    return found.values.toList();
+  }
+
   //Get track and meta from offline DB
   Future<Track?> getOfflineTrack(String id,
       {Album? album, List<Artist>? artists}) async {
@@ -822,4 +952,43 @@ Future<Map> downloadJsonFromTrack(Track t, String path,
     'path': path,
     'image': t.albumArt?.thumb
   };
+}
+
+/// Result of a batch download (a whole artist, discography, album or playlist).
+class BatchDownloadResult {
+  /// What the native queue did with the tracks (added / already present / requeued).
+  final DownloadEnqueueResult queue;
+
+  /// Tracks that were prepared for the queue.
+  final int tracks;
+
+  /// Albums that were inspected (0 for non-album batch downloads).
+  final int albums;
+
+  /// Albums that could not be loaded and were skipped.
+  final int failedAlbums;
+
+  const BatchDownloadResult({
+    required this.queue,
+    required this.tracks,
+    this.albums = 0,
+    this.failedAlbums = 0,
+  });
+
+  int get added => queue.added;
+
+  int get existing => queue.existing;
+
+  int get requeued => queue.requeued;
+
+  bool get isEmpty => queue.total == 0;
+
+  /// Short, human readable summary used by the toasts.
+  String describe() {
+    if (tracks == 0) return 'Nothing to download';
+    final List<String> parts = <String>['$tracks tracks queued'];
+    if (existing > 0) parts.add('$existing already in the queue');
+    if (failedAlbums > 0) parts.add('$failedAlbums albums skipped');
+    return parts.join(' · ');
+  }
 }

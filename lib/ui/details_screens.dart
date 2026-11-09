@@ -449,6 +449,18 @@ class _ArtistDetailsState extends State<ArtistDetails> {
                                   gravity: ToastGravity.BOTTOM);
                             },
                           ),
+                          TextButton(
+                            child: Row(
+                              children: <Widget>[
+                                const Icon(Icons.file_download, size: 32),
+                                Container(
+                                  width: 4,
+                                ),
+                                Text('Download'.i18n)
+                              ],
+                            ),
+                            onPressed: () => showArtistDownloadDialog(context, artist),
+                          ),
                           if ((artist.radio ?? false))
                             TextButton(
                               child: Row(
