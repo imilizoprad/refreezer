@@ -1,0 +1,563 @@
+name: Build APK (arm64-v8a)
+
+# Builds an installable, arm64-v8a only release APK.
+#
+# Why this workflow exists:
+#   - the repository has no CI and no reproducible build (empty submodules on a plain clone,
+#     missing lib/.env, gradle wrapper intentionally git-ignored), so nothing could be verified
+#     automatically;
+#   - this workflow materialises everything the build needs on a clean GitHub runner.
+#
+# It also publishes a diagnostic comment on pull requests when a build fails, so the failure is
+# readable from the API without downloading the (large) job log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: 'Flutter version (pinned to the release this workflow was validated against; clear it to resolve the newest stable release)'
+        required: false
+        default: '3.47.9'
+      build_mode:
+        description: 'Build mode'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      publish_release:
+        description: 'Also attach the APK to a GitHub release (tag builds always do)'
+        required: false
+        type: boolean
+        default: false
+      abi:
+        description: 'Target ABI'
+        required: true
+        default: 'arm64-v8a'
+        type: choice
+        options:
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+          - fat
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/build-apk.yml'
+      - 'pubspec.yaml'
+      - 'lib/**'
+      - 'android/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: APK (${{ inputs.build_mode || 'release' }}, ${{ inputs.abi || 'arm64-v8a' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    env:
+      # Injected from repository secrets; empty falls back to compile-only placeholders.
+      DEEZER_CLIENT_ID: ${{ secrets.DEEZER_CLIENT_ID }}
+      DEEZER_CLIENT_SECRET: ${{ secrets.DEEZER_CLIENT_SECRET }}
+      LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+      LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
+      # Optional signing secrets. Without them an ephemeral CI key is generated.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      NDK_VERSION: '28.2.13676358'
+      # Keep the wrapper in sync with android/gradle/wrapper/gradle-wrapper.properties.
+      GRADLE_VERSION: '8.14.3'
+      BUILD_MODE: ${{ inputs.build_mode || 'release' }}
+      ABI: ${{ inputs.abi || 'arm64-v8a' }}
+      LOG_DIR: ${{ github.workspace }}/.ci-logs
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Prepare log directory
+        run: mkdir -p "$LOG_DIR"
+
+      - name: Verify path dependencies (submodules) are present
+        run: |
+          set -euo pipefail
+          missing=0
+          for m in custom_navigator equalizer_flutter external_path move_to_background scrobblenaut; do
+            if [ -z "$(ls -A "$m" 2>/dev/null)" ]; then
+              echo "::error::submodule '$m' is empty"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Patch pinned submodules for the current toolchain
+        run: |
+          # Both submodules are pinned to third-party commits that predate the toolchain used
+          # here. The patches are minimal, idempotent, verified, and never committed: they only
+          # touch the runner's checkout.
+          set -euo pipefail
+          python3 - <<'EOF'
+          import re
+          import sys
+
+          ok = True
+
+          # 1. WidgetsBindingObserver gained handleStatusBarTap(); _CustomNavigatorState
+          #    implements the interface explicitly, so it must provide the member too. Insert the
+          #    stub inside that class (the file has further top-level classes after it).
+          path = 'custom_navigator/lib/custom_navigator.dart'
+          try:
+              text = open(path).read()
+          except OSError as exc:
+              print('::warning::cannot read %s: %s' % (path, exc))
+              text = ''
+          if text:
+              if 'handleStatusBarTap' in text:
+                  print('custom_navigator: already provides handleStatusBarTap()')
+              else:
+                  lines = text.splitlines()
+                  try:
+                      start = next(i for i, l in enumerate(lines)
+                                   if l.startswith('class _CustomNavigatorState'))
+                      end = next(i for i in range(start, len(lines)) if lines[i] == '}')
+                  except StopIteration:
+                      print('::error::could not locate _CustomNavigatorState in %s' % path)
+                      ok = False
+                  else:
+                      stub = [
+                          '',
+                          '  // Added by the build workflow: WidgetsBindingObserver declares',
+                          '  // handleStatusBarTap() in current Flutter releases and this class',
+                          '  // implements the interface explicitly.',
+                          '  @override',
+                          '  void handleStatusBarTap() {}',
+                      ]
+                      lines[end:end] = stub
+                      open(path, 'w').write('\n'.join(lines) + '\n')
+                      patched = open(path).read()
+                      inside = 'handleStatusBarTap' in patched
+                      print('custom_navigator: handleStatusBarTap() inserted:', inside)
+                      ok = ok and inside
+
+          # 2. scrobblenaut declares a 3.0 language version, but json_serializable >= 6.10 emits
+          #    null-aware elements (Dart 3.9+) into its generated code, which the formatter then
+          #    rejects for a 3.0 package. Raising the floor unblocks codegen.
+          sp = 'scrobblenaut/pubspec.yaml'
+          try:
+              pubspec = open(sp).read()
+          except OSError as exc:
+              print('::warning::cannot read %s: %s' % (sp, exc))
+          else:
+              new_pubspec = re.sub(r'(?m)^(\s*sdk:\s*).*$', r'\1">=3.9.0 <4.0.0"',
+                                  pubspec, count=1)
+              if new_pubspec == pubspec:
+                  print('scrobblenaut: sdk constraint unchanged (check pubspec format)')
+              else:
+                  open(sp, 'w').write(new_pubspec)
+                  print('scrobblenaut: sdk floor raised for null-aware elements')
+
+          sys.exit(0 if ok else 1)
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Resolve Flutter version
+        id: flutter-version
+        env:
+          REQUESTED: ${{ inputs.flutter_version }}
+          # Empty ceiling = newest stable release. Set e.g. 3.36.0 to stay on an older line.
+          FLUTTER_CEILING: ''
+        run: |
+          set -euo pipefail
+          if [ -n "${REQUESTED:-}" ]; then
+            echo "Using requested Flutter $REQUESTED"
+            echo "version=$REQUESTED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsSL --retry 4 --retry-all-errors -o /tmp/flutter-releases.json \
+            https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json
+          python3 - <<'EOF'
+          import json, os, re
+          ceiling = os.environ.get('FLUTTER_CEILING', '3.36.0')
+          def key(v):
+              m = re.match(r'(\d+)\.(\d+)\.(\d+)', v)
+              return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+          data = json.load(open('/tmp/flutter-releases.json'))
+          stable = [r for r in data.get('releases', [])
+                    if r.get('channel') == 'stable' and r.get('version')
+                    and '-' not in r['version']]
+          stable.sort(key=lambda r: r.get('release_date', ''), reverse=True)
+          limit = key(ceiling)
+          candidates = [r['version'] for r in stable
+                        if not ceiling or key(r['version']) < limit]
+          if not candidates and not ceiling:
+              raise SystemExit('the release feed returned no stable version')
+          version = candidates[0]
+          print('Resolved stable Flutter:', version,
+                '(ceiling: %s)' % (ceiling or 'none'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write('version=%s\n' % version)
+          EOF
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version 2>&1 | tee "$LOG_DIR/flutter-version.log"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 platforms;android-36 build-tools;35.0.0'
+
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          # The NDK is large and only needed where a plugin compiles native code, so a failure here
+          # is a warning rather than a hard stop.
+          sdkmanager "ndk;${NDK_VERSION}" > /dev/null 2>&1 \
+            || echo "::warning::NDK ${NDK_VERSION} not installed by sdkmanager."
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Create lib/.env (Envied source)
+        run: |
+          set -euo pipefail
+          if [ -n "${DEEZER_CLIENT_ID:-}" ]; then
+            echo "Using repository secrets for API keys."
+          else
+            echo "::warning::No DEEZER_CLIENT_ID secret set - using placeholders. The APK builds, but Deezer login will not work."
+          fi
+          {
+            echo "deezerClientId=${DEEZER_CLIENT_ID:-000000}"
+            echo "deezerClientSecret=${DEEZER_CLIENT_SECRET:-placeholder_deezer_secret}"
+            echo "lastFmApiKey=${LASTFM_API_KEY:-placeholder_lastfm_key}"
+            echo "lastFmApiSecret=${LASTFM_API_SECRET:-placeholder_lastfm_secret}"
+          } > lib/.env
+          echo "wrote lib/.env with $(wc -l < lib/.env) lines"
+
+      - name: Configure release signing
+        run: |
+          set -euo pipefail
+          cd android
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "Using the signing keystore from repository secrets."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+            {
+              echo "storeFile=release.keystore"
+              echo "keyAlias=${ANDROID_KEY_ALIAS:-upload}"
+              echo "keyPassword=${ANDROID_KEY_PASSWORD:-}"
+              echo "storePassword=${ANDROID_KEYSTORE_PASSWORD:-}"
+            } > key.properties
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret - generating an ephemeral CI key. The APK installs, but cannot update an app signed with another key."
+            PASSWORD="$(openssl rand -hex 16)"
+            echo "::add-mask::$PASSWORD"
+            keytool -genkeypair -v \
+              -keystore app/ci-release.jks -storetype JKS \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias ci -storepass "$PASSWORD" -keypass "$PASSWORD" \
+              -dname "CN=ReFreezer CI, OU=CI, O=CI, L=CI, S=CI, C=US" > /dev/null
+            {
+              echo "storeFile=ci-release.jks"
+              echo "keyAlias=ci"
+              echo "keyPassword=$PASSWORD"
+              echo "storePassword=$PASSWORD"
+            } > key.properties
+          fi
+          ls -la app | grep -Ei 'keystore|\.jks' || true
+
+      - name: Resolve dependencies
+        run: flutter pub get 2>&1 | tee "$LOG_DIR/pub-get.log"
+
+      - name: Ensure Gradle wrapper (git-ignored upstream)
+        continue-on-error: true
+        run: |
+          # android/gradlew and the wrapper jar are excluded by android/.gitignore upstream, so a
+          # fresh clone has none. Flutter injects them during build; this makes it explicit.
+          if [ -x android/gradlew ]; then
+            echo "Wrapper already present."
+            exit 0
+          fi
+          mkdir -p android/gradle/wrapper
+          {
+            echo "flutter.sdk=${FLUTTER_ROOT}"
+            echo "sdk.dir=${ANDROID_SDK_ROOT}"
+          } > android/local.properties
+
+          if command -v gradle > /dev/null 2>&1; then
+            (cd android && gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin) || true
+          fi
+          if [ ! -f android/gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -fsSL -o android/gradlew "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradlew" || true
+            curl -fsSL -o android/gradle/wrapper/gradle-wrapper.jar \
+              "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" || true
+          fi
+          chmod +x android/gradlew 2>/dev/null || true
+          ls -la android/gradlew android/gradle/wrapper/ 2>/dev/null || true
+
+      - name: Pre-fetch the Gradle distribution
+        run: |
+          # The runner's link to services.gradle.org occasionally times out mid-download, which
+          # kills the wrapper before Gradle even starts. Fetch the archive ourselves with retries
+          # and point the wrapper at the local file (file: URLs are supported).
+          set -euo pipefail
+          ZIP="/tmp/gradle-${GRADLE_VERSION}-bin.zip"
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            --max-time 900 -o "$ZIP" \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          ls -lh "$ZIP"
+          ZIP="$ZIP" python3 - <<'EOF'
+          import os, re
+          path = 'android/gradle/wrapper/gradle-wrapper.properties'
+          text = open(path).read()
+          text = re.sub(r'^distributionUrl=.*$',
+                        'distributionUrl=file:' + os.environ['ZIP'],
+                        text, flags=re.M)
+          open(path, 'w').write(text)
+          EOF
+          grep -n 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Generate code in path dependencies
+        run: |
+          # scrobblenaut/json_serializable models ship without their *.g.dart files, so the app
+          # does not compile until each path dependency runs its own build_runner.
+          set -uo pipefail
+          status=0
+          for pkg in custom_navigator equalizer_flutter external_path move_to_background scrobblenaut; do
+            [ -f "$pkg/pubspec.yaml" ] || continue
+            grep -qE 'build_runner|json_serializable' "$pkg/pubspec.yaml" || continue
+            echo "--- codegen for $pkg"
+            if ( cd "$pkg" && flutter pub get && dart run build_runner build ) \
+                2>&1 | tee "$LOG_DIR/codegen-$pkg.log"; then
+              echo "$pkg: build_runner succeeded"
+            else
+              echo "::error::codegen failed for $pkg"
+              status=1
+            fi
+            generated=$(find "$pkg/lib" -name '*.g.dart' | wc -l)
+            echo "$pkg: $generated generated .g.dart file(s)"
+            if [ "$generated" -eq 0 ]; then
+              echo "::error::no generated code for $pkg"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Generate code (Envied + json_serializable)
+        run: dart run build_runner build --delete-conflicting-outputs 2>&1 | tee "$LOG_DIR/build-runner.log"
+
+      - name: Analyze (non-blocking)
+        continue-on-error: true
+        run: |
+          set +e
+          flutter analyze --no-pub 2>&1 | tee "$LOG_DIR/analyze.log"
+          status=${PIPESTATUS[0]}
+          echo "ANALYZE_STATUS=$status" >> "$GITHUB_ENV"
+          [ "$status" -eq 0 ] || echo "::warning::flutter analyze exited with $status (non-blocking)"
+
+      - name: Unit tests (non-blocking)
+        continue-on-error: true
+        run: |
+          set +e
+          flutter test --no-pub --reporter expanded 2>&1 | tee "$LOG_DIR/test.log"
+          status=${PIPESTATUS[0]}
+          echo "TEST_STATUS=$status" >> "$GITHUB_ENV"
+          [ "$status" -eq 0 ] || echo "::warning::flutter test exited with $status (non-blocking)"
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          # Later duplicate keys win in a Java properties file.
+          printf '\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8\n' \
+            >> android/gradle.properties
+          grep -n "gradle-" android/gradle/wrapper/gradle-wrapper.properties || true
+          case "$ABI" in
+            arm64-v8a)   TARGET=android-arm64 ;;
+            armeabi-v7a) TARGET=android-arm ;;
+            x86_64)      TARGET=android-x64 ;;
+            fat)         TARGET="android-arm,android-arm64,android-x64" ;;
+            *)           echo "::error::unknown ABI $ABI"; exit 1 ;;
+          esac
+          echo "flutter build apk --$BUILD_MODE --target-platform $TARGET"
+          set +e
+          flutter build apk "--$BUILD_MODE" --target-platform "$TARGET" 2>&1 | tee "$LOG_DIR/build-apk.log"
+          status=${PIPESTATUS[0]}
+          exit $status
+
+      - name: Collect artifacts
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          shopt -s nullglob
+          files=(build/app/outputs/flutter-apk/*.apk)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no APK produced"
+            ls -la build/app/outputs/flutter-apk || true
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "produced: $f ($(du -h "$f" | cut -f1))"
+            cp "$f" out/
+          done
+          # Single, descriptive name for the arm64 build.
+          if [ -f out/app-arm64-v8a-release.apk ]; then
+            cp out/app-arm64-v8a-release.apk "out/ReFreezer-$ABI-$BUILD_MODE.apk"
+          elif [ -f out/app-release.apk ]; then
+            cp out/app-release.apk "out/ReFreezer-$ABI-$BUILD_MODE.apk"
+          fi
+          (cd out && sha256sum *.apk | tee SHA256SUMS.txt)
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReFreezer-${{ env.ABI }}-${{ env.BUILD_MODE }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # --- Diagnostics: make failures readable without downloading the job log ----------------
+      - name: Publish failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          OUT=/tmp/diagnostics.md
+          {
+            echo "### APK build failed"
+            echo ""
+            echo "Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null)"
+            echo "Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            echo ""
+          # Most recently modified first: the log of the step that just failed comes first, so it is
+          # not lost when the payload is trimmed below.
+          for log in $(ls -t "$LOG_DIR"/*.log 2>/dev/null); do
+            f=$(basename "$log" .log)
+              echo "<details><summary><code>$f.log</code> (errors + last 60 lines)</summary>"
+              echo ""
+              echo '```'
+              grep -iE "error|FAILURE|Exception|failed|Cannot|not found|Unsupported|requires|warning: " "$log" | tail -60
+              echo '--- tail ---'
+              tail -60 "$log"
+              echo '```'
+              echo "</details>"
+              echo ""
+            done
+          } > "$OUT"
+          # Cap the payload so the API accepts it.
+          head -c 55000 "$OUT" > "${OUT}.trim"
+          mv "${OUT}.trim" "$OUT"
+
+          # Annotations for the UI (also visible through the check-run API).
+          first_error=$(grep -iE "^.*(error:|Error:|FAILURE:|Exception)" "$LOG_DIR/build-apk.log" 2>/dev/null | head -3 | tr '\n' ' ' | cut -c1-900)
+          [ -n "$first_error" ] && echo "::error::${first_error}"
+
+          if [ -n "${PR_NUMBER:-}" ]; then
+            gh pr comment "$PR_NUMBER" --body-file "$OUT" || echo "Could not post the diagnostic comment."
+          else
+            echo "No pull request context; diagnostics only in this log."
+            cat "$OUT" | tail -80
+          fi
+
+      - name: Publish build summary
+        # Same reason as the failure diagnostics: the job log is not always reachable through the
+        # API, so the facts reviewers need are posted on the pull request.
+        if: success() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ -n "${PR_NUMBER:-}" ] || { echo "No pull request number; nothing to publish."; exit 0; }
+          {
+            echo "### APK build succeeded"
+            echo ""
+            echo "- Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null || echo n/a)"
+            echo "- Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            echo "- \`flutter analyze\` exit code: ${ANALYZE_STATUS:-not run}"
+            echo "- \`flutter test\` exit code: ${TEST_STATUS:-not run}"
+            echo ""
+            echo '```'
+            cat out/SHA256SUMS.txt 2>/dev/null || echo 'no checksums'
+            echo '```'
+            if [ -f "$LOG_DIR/analyze.log" ]; then
+              echo ""
+              echo "<details><summary>\`flutter analyze\` (exit ${ANALYZE_STATUS:-not run})</summary>"
+              echo ""
+              echo '```'
+              grep -E '^\s*(error|warning|info) •' "$LOG_DIR/analyze.log" | head -15
+              tail -2 "$LOG_DIR/analyze.log"
+              echo '```'
+              echo "</details>"
+            fi
+          } > /tmp/build-summary.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/build-summary.md \
+            || echo "Could not post the build summary."
+
+      - name: Publish GitHub release
+        # Tag builds always publish; manual runs only when requested. Pull-request runs never do.
+        if: >-
+          success() &&
+          (startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            v*) : ;;
+            *) TAG="apk-$(date -u +%Y%m%d-%H%M%S)" ;;
+          esac
+          NOTES="arm64-v8a ${BUILD_MODE} APK built from ${GITHUB_SHA} by workflow run ${GITHUB_RUN_ID}.
+          Install with: adb install ${ABI}_${BUILD_MODE}.apk (verify SHA256SUMS.txt first)."
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt --clobber
+            echo "Uploaded to existing release $TAG"
+          else
+            gh release create "$TAG" out/*.apk out/SHA256SUMS.txt \
+              --title "ReFreezer $TAG (arm64-v8a)" --notes "$NOTES"
+            echo "Created release $TAG"
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### APK build"
+            echo ""
+            echo "- Flutter: $(head -1 "$LOG_DIR/flutter-version.log" 2>/dev/null || echo n/a)"
+            echo "- Mode: \`${BUILD_MODE}\` - ABI: \`${ABI}\`"
+            if [ -f out/SHA256SUMS.txt ]; then
+              echo ""
+              echo '```'
+              cat out/SHA256SUMS.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

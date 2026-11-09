@@ -20,10 +20,20 @@ enum DownloadState {
 }
 
 /// Safe conversion from the native ordinal.
+/// Coerces a numeric value that may arrive as `int`, `num` or `String` (older platform-channel
+/// payloads sent numbers as strings). Returns `null` when the value is not numeric.
+int? coerceToInt(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value.trim());
+  return null;
+}
+
 DownloadState downloadStateFromIndex(dynamic index, {DownloadState fallback = DownloadState.NONE}) {
-  if (index is! int) return fallback;
-  if (index < 0 || index >= DownloadState.values.length) return fallback;
-  return DownloadState.values[index];
+  final int? value = coerceToInt(index);
+  if (value == null) return fallback;
+  if (value < 0 || value >= DownloadState.values.length) return fallback;
+  return DownloadState.values[value];
 }
 
 extension DownloadStateX on DownloadState {
@@ -103,9 +113,10 @@ class DownloadPriority {
   static const List<DownloadPriority> values = [high, normal, low];
 
   static DownloadPriority fromValue(dynamic value) {
-    if (value is! int) return normal;
+    final int? parsed = coerceToInt(value);
+    if (parsed == null) return normal;
     for (DownloadPriority priority in values) {
-      if (priority.value == value) return priority;
+      if (priority.value == parsed) return priority;
     }
     return normal;
   }
@@ -252,10 +263,10 @@ class Download {
       trackToken: data['trackToken'],
       md5origin: data['md5origin'],
       mediaVersion: data['mediaVersion'],
-      id: data['id'] is int ? data['id'] : int.tryParse('${data['id']}'),
+      id: coerceToInt(data['id']),
       state: downloadStateFromIndex(data['state']),
       title: data['title'],
-      quality: data['quality'] is int ? data['quality'] : int.tryParse('${data['quality']}'),
+      quality: coerceToInt(data['quality']),
       priority: DownloadPriority.fromValue(data['priority']),
       attempts: _toInt(data['attempts']),
       nextRetryAt: _toInt(data['nextRetryAt']),
@@ -272,9 +283,7 @@ class Download {
   /// Merge a lightweight progress/state payload from the native service.
   void updateFromJson(Map<dynamic, dynamic> data) {
     if (data['state'] != null) state = downloadStateFromIndex(data['state'], fallback: state);
-    if (data['quality'] != null) {
-      quality = data['quality'] is int ? data['quality'] : int.tryParse('${data['quality']}');
-    }
+    if (data['quality'] != null) quality = coerceToInt(data['quality']);
     if (data.containsKey('received')) received = _toInt(data['received']);
     if (data.containsKey('filesize')) filesize = _toInt(data['filesize']);
     if (data.containsKey('speed')) speed = _toInt(data['speed']);
@@ -284,12 +293,7 @@ class Download {
     if (data.containsKey('metadataWarning')) metadataWarning = data['metadataWarning'];
   }
 
-  static int _toInt(dynamic value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value) ?? 0;
-    return 0;
-  }
+  static int _toInt(dynamic value) => coerceToInt(value) ?? 0;
 }
 
 /// Result of enqueueing a batch of downloads.

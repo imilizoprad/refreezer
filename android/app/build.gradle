@@ -30,9 +30,12 @@ if (flutterVersionName == null) {
 
 android {
     namespace 'r.r.refreezer'
-    compileSdk 35
+    // compileSdk 36: sqflite_android 2.4.x and the jni runtime use API 36 symbols
+    // (Build.VERSION_CODES.BAKLAVA, Locale.of, Thread.threadId). targetSdk stays at 35 so the
+    // runtime behaviour of the app does not change.
+    compileSdk 36
     //ndkVersion flutter.ndkVersion
-    ndkVersion "27.0.12077973"
+    ndkVersion "28.2.13676358"
     buildFeatures.buildConfig = true
     
     compileOptions {

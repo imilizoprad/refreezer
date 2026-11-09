@@ -7,6 +7,42 @@ The project previously tracked changes through GitHub releases only; this file s
 
 ---
 
+## [CI: arm64-v8a APK build] — 2026-11-08
+
+Reproducible, installable arm64-v8a release APK built by GitHub Actions, plus the compile and build
+defects that only surfaced once the project was actually compiled. Verified by a green CI run
+([42511765494](https://github.com/imilizoprad/refreezer/actions/runs/42511765494)); see
+`BUILD_APK.md`.
+
+### Added
+
+- `.github/workflows/build-apk.yml`: single-ABI (`arm64-v8a`) `release` APK on a clean runner —
+  JDK 17, Flutter stable, Android SDK + NDK, `lib/.env` from secrets (placeholders when unset),
+  release signing from an optional base64 keystore (ephemeral key otherwise), codegen for the app
+  and its path dependencies, and the APK + `SHA256SUMS.txt` uploaded as the
+  `ReFreezer-arm64-v8a-release` artifact. Triggers: manual dispatch, `v*` tags (which also publish
+  a GitHub release) and pull requests touching the workflow, `pubspec.yaml`, `lib/**` or
+  `android/**`.
+- Failure diagnostics: the tail of every build log is posted as a pull-request comment, because the
+  job log cannot always be downloaded through the API.
+- `BUILD_APK.md`: how to obtain, install and reproduce the APK; toolchain matrix; secret table.
+
+### Fixed
+
+- `lib/ui/log_screen.dart`: `DownloadLogViewer` was referenced by `DownloadsSettings` but never
+  existed, so the app did not compile. Implemented (reads `<external files>/download.log`).
+- `lib/service/download_controller.dart`: `_lastNotify` was nullable while used as a non-nullable
+  argument to `DateTime.difference`.
+- `lib/settings.dart`: `BottomAppBarTheme` → `BottomAppBarThemeData` (renamed in Flutter 3.35).
+- `DownloadService.java`: `downloadCover()` read `md5_image` outside a `try`/`catch`, leaving
+  `JSONException` unreported — a Java compile error. The cover is now skipped when absent.
+
+### Changed
+
+- Toolchain: Gradle 8.12 → 8.14.3, AGP 8.10.0 → 8.11.1, Kotlin 2.1.20 → 2.2.20, compileSdk 35 →
+  36, NDK 27.0.12077973 → 28.2.13676358 (`sqflite_android` and the `jni` runtime need API 36
+  symbols). `targetSdk` and `minSdk` are unchanged at 35 / 21.
+
 ## [Download upgrade + Downloads redesign] — 2026-11-08
 
 Native downloader reliability, queue management, database migration and a redesigned Downloads

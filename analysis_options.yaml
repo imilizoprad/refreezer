@@ -38,7 +38,10 @@ analyzer:
   exclude:
     - "**/*.g.dart"
     # workaround for https://github.com/dart-lang/sdk/issues/42910
+    # The submodule directory is lowercase `scrobblenaut`; the original pattern was capitalized, so
+    # it never matched on Linux and the submodule's example/ folder flooded `flutter analyze`.
     - "Scrobblenaut/**"
+    - "scrobblenaut/**"
     - "custom_navigator/**"
     - "equalizer_flutter/**"
     - "external_path/**"

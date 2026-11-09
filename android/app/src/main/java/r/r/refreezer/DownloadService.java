@@ -26,6 +26,7 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -1649,13 +1650,20 @@ public class DownloadService extends Service {
         /** Cover download with explicit timeouts and atomic replace. */
         private void downloadCover(JSONObject publicTrack, File coverFile) throws IOException {
             if (publicTrack == null || !publicTrack.has("md5_image")) return;
+            String md5Image;
+            try {
+                md5Image = publicTrack.getString("md5_image");
+            } catch (JSONException e) {
+                // org.json throws for a missing or non-string value; nothing to download then.
+                return;
+            }
             File staging = new File(coverFile.getPath() + ".rfs-partial");
             HttpURLConnection connection = null;
             InputStream inputStream = null;
             OutputStream outputStream = null;
             try {
                 URL url = new URL("https://e-cdn-images.deezer.com/images/cover/"
-                        + publicTrack.getString("md5_image") + "/"
+                        + md5Image + "/"
                         + settings.albumArtResolution + "x" + settings.albumArtResolution
                         + "-000000-80-0-0.jpg");
                 connection = (HttpURLConnection) url.openConnection();

@@ -2,7 +2,9 @@
 
 **Branch:** `arena/f4b6f150-refreezer` (from `master` @ `2bb8009`, audit commit `fc21d87`)
 **Last updated:** 2026-11-08
-**Current phase:** Downloader upgrade + Premium UI/UX execution — **engine (Parts 3–6) and Downloads UI (Part 5) implemented; runtime verification BLOCKED** (see §4)
+**Current phase:** Downloader upgrade + Premium UI/UX execution — **engine (Parts 3–6) and Downloads UI (Part 5) implemented; compiled by CI into an installable arm64-v8a APK; runtime verification BLOCKED** (see §3 and §4)
+
+**Build:** see `BUILD_APK.md` — GitHub Actions builds `ReFreezer-arm64-v8a.apk` on every change under `lib/**`/`android/**` and on demand.
 
 Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs input/environment) · **UNVERIFIED** (implemented, not adequately tested).
 
@@ -68,9 +70,11 @@ Status labels: **DONE** (verified) · **IN PROGRESS** · **BLOCKED** (needs inpu
 |---|---|---|
 | Dart syntax, all `lib/**` + `test/**` | `tree_sitter` + locally compiled `tree-sitter-dart` grammar (1.0.0) | 55 files parsed; no new errors. The grammar reports 3 pre-existing failures that are **valid Dart 3 constructs it cannot parse**: `library;` (unnamed library directive) in `lib/fonts/refreezer_icons.dart:16` and `lib/utils/version.dart:28`, and an enhanced enum in `lib/utils/app_icon_changer.dart:19`. Consequence: the harness cannot validate files using those two constructs, so new code avoids them deliberately. |
 | Java syntax, all `android/**/*.java` | `javalang` | 13 files, 0 parse errors |
-| Semantic compile (`javac`/`dart analyze`) | — | **BLOCKED** — no JDK/Dart/Flutter |
-| Unit tests | — | **BLOCKED** — no Dart/Flutter; tests are unrun |
-| Runtime/device behaviour | — | **BLOCKED** — no emulator, no Deezer account |
+| Semantic compile (`javac`/`dart analyze`) | — | **BLOCKED in the authoring sandbox**; performed by CI instead (row below) |
+| Full Flutter/Java/Gradle build (release APK) | GitHub Actions `build-apk.yml`, run [42517164969](https://github.com/imilizoprad/refreezer/actions/runs/42517164969) | **PASSED** — Flutter 3.47.9 / Dart 3.13.7, JDK 17, Gradle 8.14.3, AGP 8.11.1, Kotlin 2.2.20, compileSdk 36, NDK 28.2.13676358; produced and uploaded the `ReFreezer-arm64-v8a-release` artifact (41.97 MB) |
+| Unit tests | `flutter test` in CI | **PASSED** — 33 tests, exit code 0 (the step is non-blocking, so a future regression would not block the APK) |
+| Static analysis | `flutter analyze` in CI | 64 findings, all `info` level (missing type annotations in `lib/api/definitions.dart`, `Color.value` and `ConcatenatingAudioSource` deprecations). No errors or warnings; non-blocking |
+| Runtime/device behaviour | — | **BLOCKED** — no emulator, no Deezer account. The APK installs and starts unverified |
 
 What the syntax checks do **not** prove: type correctness, API availability against the pinned Flutter/AGP versions, Gradle/manifest validity, and any runtime behaviour (downloads, decryption, resume, notifications).
 
