@@ -1,6 +1,10 @@
 # Downloader Upgrade + Premium UI/UX — Delivery Report
 
 **Date:** 2026-11-08 · **Branch:** `arena/f4b6f150-refreezer` (base `2bb8009`, audit `fc21d87`)
+> **Update (2026-11-08):** the bespoke design tokens/components described here were removed. The
+> Downloads screen now uses the app's own design system (`FreezerAppBar`, `ListTile`/`FreezerDivider`
+> rows, `MenuSheet`, `Fluttertoast`), and whole-artist downloads were added. See `CHANGELOG.md`.
+
 **Scope delivered:** downloader engine (Parts 3–4/6), queue management, database migration, design
 system and a rebuilt Downloads screen (Part 5), tests, documentation.
 

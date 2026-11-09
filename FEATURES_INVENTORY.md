@@ -102,6 +102,9 @@
 
 ### 1.7 Downloads / offline storage
 
+> Note (2026-11-08): the queue-control, "clear all" and DB-migration rows below describe the audited
+> baseline; they were superseded by the downloader upgrade (`CHANGELOG.md`).
+
 | Feature | Status | Evidence / notes |
 |---|---|---|
 | External downloads (to Music folder / SAF) | IMPLEMENTED | Java `DownloadService`; permission gate `FileUtils.checkExternalStoragePermissions` |
@@ -113,7 +116,9 @@
 | Queue controls: pause/resume/stop, retry failed, clear by state | IMPLEMENTED | `downloads_screen.dart`, `DownloadService` opcodes |
 | Per-download progress + notification | IMPLEMENTED | EventChannel `onProgress` (500 ms loop), notification per download |
 | Download log viewer | IMPLEMENTED | `download.log` in-app |
-| Storage-space pre-check | MISSING | Disk space is only *displayed* in settings; no check before enqueueing |
+| Download whole album / playlist | IMPLEMENTED | `DownloadManager.addOfflineAlbum` / `addOfflinePlaylist`; details screens and long-press menus |
+| Download whole artist (discography + top tracks) | IMPLEMENTED | `DownloadManager.downloadArtist`; artist screen button and long-press menu; confirm + progress dialogs |
+| Storage-space pre-check | PARTIAL | The Downloads screen shows free space vs. the estimated need for the queue; nothing blocks enqueueing |
 | "Clear all" safety | **BROKEN (static)** | `downloads_screen.dart:96-106` deletes all states with no confirmation (single delete does confirm) |
 | Background continuation | UNVERIFIED | `START_STICKY` + separate process + `stopWithTask=false`; behaviour after reboot/task removal untested |
 | DB migration path | **BROKEN (static)** | `DownloadsDatabase.onUpgrade` → `onCreate` without dropping tables |
