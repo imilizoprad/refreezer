@@ -7,6 +7,34 @@ The project previously tracked changes through GitHub releases only; this file s
 
 ---
 
+## [Downloads in the app's own design system, whole-artist downloads] — 2026-11-08
+
+The Downloads screen now uses the same widgets and visual language as every other screen, and a
+whole artist can be queued in one action.
+
+### Changed
+
+- **Downloads screen rewritten in the app's design language.** It uses `FreezerAppBar`, `ListTile`
+  rows with 48 px artwork, `FreezerDivider` separators, section headers in the same style as the
+  "DISK" labels, a `PopupMenuButton` filter with counts (same pattern as the library sort menu),
+  `MenuSheet` bottom sheets for row actions, `AlertDialog`s for confirmations and `Fluttertoast`s
+  for feedback. The previous bespoke `lib/ui/design/{tokens,components}.dart` layer was removed:
+  the app has one design system, not two.
+- All queue behaviour is unchanged: filters, search, grouped sections, swipe to pause/cancel,
+  multi-select batch actions, priorities, retry, clear history, storage estimate.
+
+### Added
+
+- **Download a whole artist.** `downloadManager.downloadArtist()` loads the artist's discography
+  page by page (top tracks included), prepares every track and enqueues the batch, reporting how
+  many tracks were added, already queued or skipped because an album could not be loaded. It is
+  reachable from the artist screen ("Download" next to Library/Radio) and from the artist long-press
+  menu ("Download artist"), with a confirm dialog and a progress dialog while the discography
+  loads.
+- Whole **album** and **playlist** downloads were already available (details screens and
+  long-press menus); the Downloads screen's empty state now names all four entry points so the
+  feature is discoverable.
+
 ## [CI: arm64-v8a APK build] — 2026-11-08
 
 Reproducible, installable arm64-v8a release APK built by GitHub Actions, plus the compile and build

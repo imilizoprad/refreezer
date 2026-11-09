@@ -395,10 +395,22 @@ class MenuSheet {
       {required BuildContext context, List<Widget> options = const [], Function? onRemove}) {
     show(context, [
       (artist.library != null) ? removeArtist(artist, context, onRemove: onRemove) : favoriteArtist(artist, context),
+      downloadArtist(artist, context),
       shareTile('artist', artist.id!),
       ...options
     ]);
   }
+
+  //Download every album (and the top tracks) of an artist
+  Widget downloadArtist(Artist a, BuildContext context) => ListTile(
+        title: Text('Download artist'.i18n),
+        subtitle: Text('Every album and the top tracks'.i18n),
+        leading: const Icon(Icons.file_download),
+        onTap: () {
+          _close(context);
+          showArtistDownloadDialog(context, a);
+        },
+      );
 
   //===================
   // ARTIST OPTIONS
@@ -852,6 +864,132 @@ class _CreatePlaylistDialogState extends State<CreatePlaylistDialog> {
           },
         )
       ],
+    );
+  }
+}
+
+/// Confirm and run a whole-artist download ("every album and the top tracks").
+///
+/// The discography can take a while to load, so the work happens inside a modal dialog that shows
+/// which album is being prepared. The result is reported with the usual toast.
+Future<void> showArtistDownloadDialog(BuildContext context, Artist artist) async {
+  if (!context.mounted) return;
+  final bool? confirmed = await showDialog<bool>(
+    context: context,
+    builder: (BuildContext context) => AlertDialog(
+      title: Text('Download artist'.i18n),
+      content: Text(
+        'Every track of every album plus the top tracks of ${artist.name ?? ''} will be queued. '
+        'This can take a while and uses a lot of storage.',
+        textAlign: TextAlign.left,
+      ),
+      actions: <Widget>[
+        TextButton(
+          child: Text('Cancel'.i18n),
+          onPressed: () => Navigator.of(context).pop(false),
+        ),
+        TextButton(
+          child: Text('Download'.i18n),
+          onPressed: () => Navigator.of(context).pop(true),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  final BatchDownloadResult? result = await showDialog<BatchDownloadResult>(
+    context: context,
+    barrierDismissible: false,
+    builder: (BuildContext context) => ArtistDownloadDialog(artist: artist),
+  );
+
+  if (!context.mounted) return;
+  Fluttertoast.showToast(
+    msg: result == null ? 'Nothing to download'.i18n : result.describe(),
+    gravity: ToastGravity.BOTTOM,
+    toastLength: Toast.LENGTH_LONG,
+  );
+}
+
+/// Progress dialog for [showArtistDownloadDialog]. Pops itself with the enqueue result.
+class ArtistDownloadDialog extends StatefulWidget {
+  final Artist artist;
+
+  const ArtistDownloadDialog({super.key, required this.artist});
+
+  @override
+  State<ArtistDownloadDialog> createState() => _ArtistDownloadDialogState();
+}
+
+class _ArtistDownloadDialogState extends State<ArtistDownloadDialog> {
+  String _status = 'Loading discography…';
+  double? _progress;
+  String? _error;
+  bool _started = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _run();
+  }
+
+  Future<void> _run() async {
+    if (_started) return;
+    _started = true;
+    try {
+      final BatchDownloadResult? result = await downloadManager.downloadArtist(
+        widget.artist,
+        onProgress: (int done, int total) {
+          if (!mounted) return;
+          setState(() {
+            _progress = total > 0 ? done / total : null;
+            _status = 'Loading album $done of $total';
+          });
+        },
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop(result);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _status = 'Could not start the download';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Download artist'.i18n),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(_status.i18n),
+          if (_error != null) ...<Widget>[
+            const SizedBox(height: 8.0),
+            Text(
+              _error!,
+              style: TextStyle(fontSize: 12.0, color: Colors.red.shade400),
+            ),
+          ],
+          const SizedBox(height: 16.0),
+          if (_error == null)
+            LinearProgressIndicator(
+              value: _progress,
+              color: Theme.of(context).primaryColor,
+            ),
+        ],
+      ),
+      actions: _error == null
+          ? null
+          : <Widget>[
+              TextButton(
+                child: Text('Close'.i18n),
+                onPressed: () => Navigator.of(context).pop(null),
+              ),
+            ],
     );
   }
 }
